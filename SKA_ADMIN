@@ -1,0 +1,3673 @@
+--[[
+    ================================================================================
+    SKA ADMIN v9.1 — FINAL COMPLETE BUILD
+    ================================================================================
+    Based on: Mois7 Admin + AK Admin
+    Authors:  i8agy & Team
+    Credits:  Schweins (original logic), M7 UI style
+    © 2026 SKA Administration — All Rights Reserved
+
+    Features:
+      • Full original Bring All / Bring Murderer / ESP / Fullbright / Team logic
+      • Thin M7-Style Overhead Nametags (Logo, Tag, Username)
+      • Distance-based portal circles → click to teleport
+      • Hover shows Roblox profile thumbnail (avatar headshot)
+      • Click own nametag → Nametag Editor (JSON-backed)
+      • Nametag Editor: Text, Fonts, Colors, Presets, Export
+      • JSON-Authoritative Rank System (GitHub raw)
+      • Rank tags: "SKA USER (free/premium/admin)" / "SKA USER [Owner]"
+      • Admin Panel: Fling / Blind / Kill / Crash (rank-gated)
+      • Settings Panel: Theme Presets + custom color picker
+      • Mini SKA button: circular, centered, draggable after close
+      • Minimize button always visible above status bar
+      • Original credits preserved
+      • Anti-VC Ban (blocks VoiceChat ban via rejoin guard)
+      • LocalHost bridge ping (SKA_bridge.py)
+    ================================================================================
+--]]
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+local Lighting          = game:GetService("Lighting")
+local Teams             = game:GetService("Teams")
+local Stats             = game:GetService("Stats")
+local MarketplaceService= game:GetService("MarketplaceService")
+
+local localPlayer  = Players.LocalPlayer
+local PlayerGui    = localPlayer:WaitForChild("PlayerGui")
+-- Mouse is only available on PC — safe fallback for mobile
+local Mouse = nil
+pcall(function() Mouse = localPlayer:GetMouse() end)
+
+-- ============================================================
+-- EXECUTOR HTTP BRIDGE (With Cache-Bust Implementation)
+-- ============================================================
+local raw_http_request = (syn and syn.request)
+    or (http and http.request)
+    or (fluxus and fluxus.request)
+    or (delta and delta.request)        -- Delta executor
+    or (Delta and Delta.request)        -- Delta (capitalised)
+    or (getgenv and getgenv().request)  -- some mobile executors
+    or (request)
+    or nil
+
+-- Dynamic cache-busting wrapper to force-download updated JSON profiles
+local function http_fetch(url, method)
+    method = method or "GET"
+    
+    -- Inject millisecond-precision timestamp parameter to completely bypass CDN & client caching
+    if method == "GET" then
+        local connector = string.find(url, "%?") and "&" or "?"
+        url = url .. connector .. "t=" .. tostring(tick())
+    end
+
+    -- Use game:HttpGet directly if available on your executor, fallback to HTTP request bodies
+    if game and game.HttpGet then
+        local success, result = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if success then return result end
+    end
+
+    if raw_http_request then
+        local success, response = pcall(function()
+            return raw_http_request({
+                Url = url,
+                Method = method,
+                Headers = {
+                    ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+                    ["Pragma"] = "no-cache",
+                    ["Expires"] = "0"
+                }
+            })
+        end)
+        if success and response and response.Body then
+            return response.Body
+        end
+    end
+    
+    return nil
+end
+
+-- ============================================================
+-- CLEANUP OLD INSTANCES
+-- ============================================================
+if _G.SKA_FINAL_UI   then pcall(function() _G.SKA_FINAL_UI:Destroy()   end) end
+if _G.SKA_BRING_CONN then pcall(function() _G.SKA_BRING_CONN:Disconnect() end) end
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+local CONFIG = {
+    Version         = "9.1",
+    GitHubURL       = "https://raw.githubusercontent.com/DukeBigglesworth/SKA-Json/refs/heads/main/Config",
+    -- ⚠️  CHANGE THIS to your public IP or ngrok URL so friends can connect!
+    -- Example public IP:  "http://123.45.67.89:5000"
+    -- Example ngrok:      "https://xxxx.ngrok-free.app"
+    -- Localhost only works on YOUR PC:
+    LocalHostURL    = "https://ska-admin.onrender.com",
+    RefreshInterval = 30,
+    NametagDistance = 100,   -- studs: full nametag visible
+    PortalDistance  = 200,   -- studs: portal circle visible
+    BringOffset     = 5,     -- studs in front of player
+    DebugMode       = true,  -- set false once working
+}
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local State = {
+    BringActive       = false,
+    BringMurdererOnly = false,
+    ESPEnabled        = false,
+    Fullbright        = false,
+    IsMinimized       = false,
+    CurrentTab        = "Combat",
+    NametagEditorOpen = false,
+    ServerDropOpen    = false,
+    AntiVCBan         = false,
+    FlyActive         = false,
+}
+
+-- ============================================================
+-- RANK DEFINITIONS
+-- ============================================================
+local RANK_INFO = {
+    [0] = { Name = "free",    Tag = "SKA USER (free)",    Color = Color3.fromRGB(160,160,160) },
+    [1] = { Name = "premium", Tag = "SKA USER (premium)", Color = Color3.fromRGB(235,180,50)  },
+    [2] = { Name = "admin",   Tag = "SKA USER (admin)",   Color = Color3.fromRGB(235,50,50)   },
+    [3] = { Name = "Owner",   Tag = "SKA USER [Owner]",   Color = Color3.fromRGB(255,50,100)  },
+}
+
+-- ============================================================
+-- THEME SYSTEM
+-- ============================================================
+local Theme = {
+    Background          = Color3.fromRGB(14,  14,  18),
+    BackgroundSecondary = Color3.fromRGB(22,  22,  28),
+    BackgroundTertiary  = Color3.fromRGB(30,  30,  38),
+    Text                = Color3.fromRGB(245, 245, 250),
+    TextDim             = Color3.fromRGB(150, 150, 165),
+    Border              = Color3.fromRGB(40,  40,  52),
+    Accent              = Color3.fromRGB(220, 40,  60),
+    Murderer            = Color3.fromRGB(255, 70,  90),
+    Sheriff             = Color3.fromRGB(80,  150, 255),
+    Alive               = Color3.fromRGB(80,  220, 130),
+    Dead                = Color3.fromRGB(100, 100, 100),
+    BgImage             = "",
+    MiniImage           = "",
+}
+
+local THEME_PRESETS = {
+    { Name = "SKA Red",  BG = Color3.fromRGB(14,14,18),     Accent = Color3.fromRGB(220,40,60)   },
+    { Name = "Sakura",   BG = Color3.fromRGB(255,228,235),  Accent = Color3.fromRGB(255,130,160) },
+    { Name = "Dark",     BG = Color3.fromRGB(20,20,26),     Accent = Color3.fromRGB(110,110,130) },
+    { Name = "Hacker",   BG = Color3.fromRGB(6,12,8),       Accent = Color3.fromRGB(0,180,70)    },
+    { Name = "Ocean",    BG = Color3.fromRGB(12,28,50),     Accent = Color3.fromRGB(50,140,220)  },
+    { Name = "Royal",    BG = Color3.fromRGB(30,15,50),     Accent = Color3.fromRGB(150,80,220)  },
+    { Name = "Blood",    BG = Color3.fromRGB(30,6,10),      Accent = Color3.fromRGB(200,40,60)   },
+}
+
+-- ============================================================
+-- SERVER / USER DATA
+-- ============================================================
+local ServerData = {
+    Users          = {},
+    Banned         = {},
+    GlobalSettings = {
+        freeUserCommands    = {"bring_all","esp","fullbright"},
+        paidUserCommands    = {"bring_all","bring_murderer","esp","fullbright","fling","blind","kill"},
+        adminCommands       = {"bring_all","bring_murderer","esp","fullbright","fling","blind","kill","crash"},
+        ownerCommands       = {"all"},
+        maintenanceMode     = false,
+    },
+}
+
+local LocalUser = {
+    Rank           = 0,
+    Tag            = RANK_INFO[0].Tag,
+    TagColor       = Color3.fromRGB(160,160,160),
+    GlowColor      = Color3.fromRGB(180,180,180),
+    OutlineColor   = Color3.fromRGB(160,160,160),
+    BackgroundColor= Color3.fromRGB(20,20,25),
+    Font           = "GothamBold",
+    CanEditNametag = false,
+    AllowedCommands= {},
+    IsBanned       = false,
+    BanReason      = nil,
+    BannedBy       = nil,
+    Logo           = "default",
+    Animation      = "none",
+}
+
+local pardoned = {
+    ["HiddenSinner"] = true,
+    ["nightluff"]    = true,
+    ["btbeezy_333"]  = true,
+    ["bteezy_333"]   = true,
+}
+
+-- ============================================================
+-- NAMETAG FONTS & PRESETS
+-- ============================================================
+local NAMETAG_FONTS = {
+    "Code","Gotham","GothamBold","SourceSans","SourceSansBold",
+    "SourceSansItalic","SourceSansLight","SourceSansSemibold",
+    "Roboto","RobotoMono","Ubuntu","Cartoon","Fantasy",
+    "Antique","Arcade","Bangers","Creepster","DenkOne",
+    "Fondamento","FredokaOne","GrenzeGotisch","IndieFlower",
+    "JosefinSans","Jura","Kalam","LuckiestGuy","Merriweather",
+    "Michroma","Nunito","Oswald","PatrickHand","PermanentMarker",
+    "Poppins","Raleway","RobotoCondensed","Sarpanch",
+    "SpecialElite","TitilliumWeb","UbuntuCondensed",
+}
+
+local NAMETAG_PRESETS = {
+    { Name="Default",      Tag="SKA USER (free)",    TagColor="160,160,160", GlowColor="180,180,180", OutlineColor="160,160,160", BG="20,20,25",  Font="GothamBold" },
+    { Name="Gold Premium", Tag="SKA USER (premium)", TagColor="235,180,50",  GlowColor="255,200,80",  OutlineColor="235,180,50",  BG="25,20,10",  Font="GothamBold" },
+    { Name="Cyber Admin",  Tag="SKA USER (admin)",   TagColor="0,255,100",   GlowColor="0,200,80",    OutlineColor="0,255,100",   BG="10,20,15",  Font="Code"       },
+    { Name="Royal Owner",  Tag="SKA USER [Owner]",   TagColor="255,50,100",  GlowColor="255,100,200", OutlineColor="255,50,150",  BG="30,10,25",  Font="GothamBold" },
+    { Name="Sakura",       Tag="✿ SAKURA",           TagColor="255,150,200", GlowColor="255,180,220", OutlineColor="255,130,180", BG="255,228,235",Font="Fondamento" },
+}
+
+-- ============================================================
+-- COLLECTIONS
+-- ============================================================
+local Highlights   = {}   -- player → Highlight instance
+local Nametags     = {}   -- player → nametag table
+local ActiveSKAUsers = {} -- bridge data: SKA users in active servers
+local Connections  = {}   -- named RBXConnections
+
+-- ============================================================
+-- UI REFERENCE TABLE
+-- ============================================================
+local UI = {}
+
+-- ============================================================
+-- UTILITY
+-- ============================================================
+local function log(msg)
+    if CONFIG.DebugMode then print("[SKA] "..tostring(msg)) end
+end
+
+local function tween(obj, props, dur, style, dir)
+    TweenService:Create(obj,
+        TweenInfo.new(dur or 0.25, style or Enum.EasingStyle.Quart, dir or Enum.EasingDirection.Out),
+        props):Play()
+end
+
+local function makeDraggable(frame)
+    local dragging, dragStart, startPos
+    frame.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = inp.Position
+            startPos  = frame.Position
+        end
+    end)
+    frame.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement
+            or inp.UserInputType == Enum.UserInputType.Touch) then
+            local d = inp.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+local function notify(title, msg, dur)
+    dur = dur or 3
+    local ng = Instance.new("ScreenGui")
+    ng.Name  = "SKA_Notif"
+    ng.ResetOnSpawn = false
+    ng.Parent = PlayerGui
+
+    local f = Instance.new("Frame", ng)
+    f.Size     = UDim2.new(0, 280, 0, 75)
+    f.Position = UDim2.new(1, 310, 0, 60)
+    f.BackgroundColor3 = Theme.BackgroundSecondary
+    f.BorderSizePixel  = 0
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+
+    local stroke = Instance.new("UIStroke", f)
+    stroke.Color = Theme.Accent  stroke.Thickness = 1.5
+
+    local t1 = Instance.new("TextLabel", f)
+    t1.Size = UDim2.new(1,-16,0,22)  t1.Position = UDim2.new(0,8,0,6)
+    t1.BackgroundTransparency = 1  t1.Text = title
+    t1.TextColor3 = Theme.Accent  t1.Font = Enum.Font.GothamBold
+    t1.TextSize = 13  t1.TextXAlignment = Enum.TextXAlignment.Left
+
+    local t2 = Instance.new("TextLabel", f)
+    t2.Size = UDim2.new(1,-16,0,38)  t2.Position = UDim2.new(0,8,0,30)
+    t2.BackgroundTransparency = 1  t2.Text = msg
+    t2.TextColor3 = Theme.Text  t2.Font = Enum.Font.Gotham
+    t2.TextSize = 11  t2.TextXAlignment = Enum.TextXAlignment.Left
+    t2.TextWrapped = true
+
+    tween(f, {Position = UDim2.new(1,-295,0,60)}, 0.45)
+    task.delay(dur, function()
+        tween(f, {Position = UDim2.new(1,310,0,60)}, 0.45)
+        task.wait(0.5)
+        ng:Destroy()
+    end)
+end
+
+-- ============================================================
+-- COLOR HELPERS
+-- ============================================================
+local function rgbToHex(c)
+    return string.format("#%02X%02X%02X",
+        math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+end
+
+local function hexToRGB(h)
+    if h:sub(1,1)=="#" then h=h:sub(2) end
+    if #h~=6 then return Color3.new(1,1,1) end
+    return Color3.fromRGB(
+        tonumber(h:sub(1,2),16) or 255,
+        tonumber(h:sub(3,4),16) or 255,
+        tonumber(h:sub(5,6),16) or 255)
+end
+
+local function strToColor(s)
+    if not s then return Color3.fromRGB(220,40,60) end
+    local r,g,b = tostring(s):match("(%d+),%s*(%d+),%s*(%d+)")
+    if r then return Color3.fromRGB(tonumber(r),tonumber(g),tonumber(b)) end
+    return Color3.fromRGB(220,40,60)
+end
+
+local function colorToStr(c)
+    return string.format("%d, %d, %d",
+        math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+end
+
+-- Case-insensitive lookup helper (Roblox usernames can differ in casing)
+local function findUserEntry(tbl, name)
+    if not tbl or not name then return nil end
+    if tbl[name] then return tbl[name] end
+    local lower = string.lower(name)
+    for k, v in pairs(tbl) do
+        if type(k) == "string" and string.lower(k) == lower then
+            return v
+        end
+    end
+    return nil
+end
+
+-- ============================================================
+-- PERMISSION SYSTEM
+-- ============================================================
+local function hasPermission(cmd)
+    if LocalUser.IsBanned then return false end
+    if LocalUser.Rank == 3 then return true end
+    local allowed = LocalUser.AllowedCommands or {}
+    if table.find(allowed,"all") then return true end
+    return table.find(allowed, cmd) ~= nil
+end
+
+local function canTarget(targetName)
+    if LocalUser.IsBanned then return false end
+    if LocalUser.Rank == 3 then return true end
+    local entry = findUserEntry(ServerData.Users, targetName)
+    local targetRank = (entry and tonumber(entry.rank)) or 0
+    if LocalUser.Rank == 2 and targetRank < 2 then return true end
+    if LocalUser.Rank == 1 and targetRank < 1 then return true end
+    return false
+end
+
+local function getUserRank(name)
+    -- Prefer live bridge data (same server), then GitHub JSON
+    local bridge = ActiveSKAUsers[name] or findUserEntry(ActiveSKAUsers, name)
+    if bridge and bridge.rank ~= nil then
+        return tonumber(bridge.rank) or 0
+    end
+    local d = findUserEntry(ServerData.Users, name)
+    return (d and tonumber(d.rank)) or 0
+end
+
+local function getUserTag(name)
+    -- Prefer live bridge custom tag, then GitHub, then rank default
+    local bridge = ActiveSKAUsers[name] or findUserEntry(ActiveSKAUsers, name)
+    if bridge and bridge.tag and bridge.tag ~= "" then
+        return bridge.tag
+    end
+    local d = findUserEntry(ServerData.Users, name)
+    if d and d.tag then return d.tag end
+    local r = getUserRank(name)
+    return (RANK_INFO[r] and RANK_INFO[r].Tag) or "SKA USER (free)"
+end
+
+-- ============================================================
+-- NETWORK — GITHUB JSON FETCH
+-- ============================================================
+local function httpGetRaw(url)
+    -- Prefer game:HttpGet, fall back to executor request APIs
+    local ok, raw = pcall(function()
+        return game:HttpGet(url, true)
+    end)
+    if ok and raw and raw ~= "" and not tostring(raw):find("<!DOCTYPE") and not tostring(raw):find("<html") then
+        return raw
+    end
+    if http_request then
+        local ok2, res = pcall(function()
+            return http_request({ Url = url, Method = "GET" })
+        end)
+        if ok2 and res then
+            local body = res.Body or res.body
+            if body and body ~= "" then return body end
+        end
+    end
+    return nil
+end
+
+local function fetchGitHub()
+    pcall(function()
+        local raw = httpGetRaw(CONFIG.GitHubURL)
+        if not raw or raw == "" then
+            log("fetchGitHub FAILED — empty response / HttpGet blocked")
+            return
+        end
+        local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or type(data) ~= "table" then
+            log("fetchGitHub FAILED — JSON decode error")
+            return
+        end
+
+        ServerData.Users    = data.users    or {}
+        ServerData.Banned   = data.banned   or {}
+        if data.globalSettings then
+            ServerData.GlobalSettings = data.globalSettings
+        end
+
+        -- Ban check — ALWAYS re-evaluate (fixes sticky ban after unban)
+        local banEntry = findUserEntry(ServerData.Banned, localPlayer.Name)
+        if banEntry then
+            LocalUser.IsBanned  = true
+            LocalUser.BanReason = banEntry.reason or "No reason given"
+            LocalUser.BannedBy  = banEntry.bannedBy or "an admin"
+            -- Kick immediately with JSON reason
+            local msg = string.format(
+                "Banned from SKA by %s\nReason: %s",
+                tostring(LocalUser.BannedBy),
+                tostring(LocalUser.BanReason)
+            )
+            task.defer(function()
+                pcall(function() localPlayer:Kick(msg) end)
+            end)
+            log("BANNED — kicking: "..msg)
+            return
+        else
+            -- Explicitly clear ban if they were previously banned this session
+            LocalUser.IsBanned  = false
+            LocalUser.BanReason = nil
+            LocalUser.BannedBy  = nil
+        end
+
+        -- Load own data (case-insensitive username match)
+        local me = findUserEntry(ServerData.Users, localPlayer.Name)
+        if me then
+            LocalUser.Rank    = tonumber(me.rank) or 0
+            LocalUser.Tag     = me.tag  or (RANK_INFO[LocalUser.Rank] and RANK_INFO[LocalUser.Rank].Tag) or "SKA USER (free)"
+            LocalUser.CanEditNametag = me.canEditNametag == true or (LocalUser.Rank >= 1)
+            if me.tagColor        then LocalUser.TagColor         = strToColor(me.tagColor)        end
+            if me.glowColor       then LocalUser.GlowColor        = strToColor(me.glowColor)       end
+            if me.outlineColor    then LocalUser.OutlineColor     = strToColor(me.outlineColor)    end
+            if me.backgroundColor then LocalUser.BackgroundColor  = strToColor(me.backgroundColor) end
+            if me.font            then LocalUser.Font             = me.font                        end
+            if me.logo            then LocalUser.Logo             = me.logo                        end
+            if me.animation       then LocalUser.Animation        = me.animation                   end
+        else
+            -- Not in JSON → free user
+            LocalUser.Rank           = 0
+            LocalUser.Tag            = RANK_INFO[0].Tag
+            LocalUser.CanEditNametag = false
+            LocalUser.TagColor       = RANK_INFO[0].Color
+        end
+
+        -- Clamp rank to known range
+        if not RANK_INFO[LocalUser.Rank] then
+            LocalUser.Rank = 0
+        end
+
+        -- Set allowed commands
+        local rankKey = LocalUser.Rank == 3 and "ownerCommands"
+                     or LocalUser.Rank == 2 and "adminCommands"
+                     or LocalUser.Rank == 1 and "paidUserCommands"
+                     or "freeUserCommands"
+        LocalUser.AllowedCommands = ServerData.GlobalSettings[rankKey] or {}
+
+        log("Loaded. Name="..localPlayer.Name.." Rank="..LocalUser.Rank.." Tag="..tostring(LocalUser.Tag))
+    end)
+end
+
+-- ============================================================
+-- NETWORK — LOCALHOST BRIDGE
+-- ============================================================
+local function pingBridge()
+    if not http_request then return end
+    pcall(function()
+        http_request({
+            Url    = CONFIG.LocalHostURL.."/update",
+            Method = "POST",
+            Headers= {["Content-Type"]="application/json"},
+            Body   = HttpService:JSONEncode({
+                username         = localPlayer.Name,
+                displayName      = localPlayer.DisplayName,
+                placeId          = game.PlaceId,
+                jobId            = game.JobId,
+                rank             = LocalUser.Rank,
+                timestamp        = os.time(),
+                -- Live custom nametag styles so other clients in the same server see them
+                tag              = LocalUser.Tag,
+                tagColor         = colorToStr(LocalUser.TagColor),
+                glowColor        = colorToStr(LocalUser.GlowColor),
+                outlineColor     = colorToStr(LocalUser.OutlineColor),
+                backgroundColor  = colorToStr(LocalUser.BackgroundColor),
+                font             = LocalUser.Font,
+            })
+        })
+    end)
+end
+
+local function fetchBridgeUsers()
+    if not http_request then return end
+    pcall(function()
+        local res = http_request({ Url=CONFIG.LocalHostURL.."/users", Method="GET" })
+        if res and res.Body and res.StatusCode == 200 then
+            local ok, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if ok and type(d)=="table" then 
+                ActiveSKAUsers = d 
+                local count = 0
+                for _ in pairs(ActiveSKAUsers) do count = count + 1 end
+                log("Bridge users online: "..count)
+            end
+        else
+            log("fetchBridgeUsers FAILED - StatusCode: "..(res and tostring(res.StatusCode) or "nil"))
+        end
+    end)
+end
+
+-- ============================================================
+-- COMMAND SYSTEM (Admin → Bridge → Target)
+-- ============================================================
+
+-- Execute command received from bridge (MUST be defined before pollForCommands)
+local function executeReceivedCommand(cmd)
+    local commandType = cmd.command
+    local issuer      = cmd.issuer or "?"
+
+    log("Received command: "..commandType.." from "..issuer)
+
+    local char = localPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+
+    if commandType == "kill" then
+        if hum then
+            hum.Health = 0
+            notify("⚔ Admin Action", issuer.." killed you", 3)
+        end
+
+    elseif commandType == "kick" or commandType == "crash" then
+        localPlayer:Kick("[SKA Admin] Removed by "..issuer)
+
+    elseif commandType == "blind" then
+        local pg = PlayerGui
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "SKA_Blind"  sg.ResetOnSpawn = false  sg.DisplayOrder = 9999
+        local fr = Instance.new("Frame", sg)
+        fr.Size = UDim2.new(1,0,1,0)  fr.BackgroundColor3 = Color3.new(0,0,0)
+        sg.Parent = pg
+        game:GetService("Debris"):AddItem(sg, 10)
+        notify("👁 Admin Action", issuer.." blinded you for 10s", 3)
+
+    elseif commandType == "bring" then
+        local issuerPlr = Players:FindFirstChild(issuer)
+        if issuerPlr and issuerPlr.Character and issuerPlr.Character:FindFirstChild("HumanoidRootPart") and hrp then
+            hrp.CFrame = issuerPlr.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -3)
+            notify("🔗 Admin Action", issuer.." brought you", 2)
+        else
+            notify("🔗 Admin Action", issuer.." requested bring", 2)
+        end
+
+    elseif commandType == "fling" then
+        if hrp then
+            local bv = Instance.new("BodyVelocity")
+            bv.Velocity = Vector3.new(math.random(-1200,1200), 1200, math.random(-1200,1200))
+            bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bv.Parent   = hrp
+            game:GetService("Debris"):AddItem(bv, 0.3)
+            notify("🚀 Admin Action", issuer.." flung you", 2)
+        end
+
+    elseif commandType == "freeze" then
+        if hum then
+            hum.WalkSpeed = 0  hum.JumpPower = 0
+            notify("❄ Admin Action", issuer.." froze you", 3)
+        end
+
+    elseif commandType == "unfreeze" then
+        if hum then
+            hum.WalkSpeed = 16  hum.JumpPower = 50
+            notify("🔓 Admin Action", issuer.." unfroze you", 2)
+        end
+
+    elseif commandType == "respawn" then
+        localPlayer:LoadCharacter()
+        notify("♻ Admin Action", issuer.." respawned you", 2)
+    end
+end
+
+-- Send command through bridge (bridge validates rank + jobId match)
+local function sendCommandToBridge(targetName, commandType)
+    if not http_request then
+        notify("Bridge Error","HTTP requests not available in this executor",3)
+        return
+    end
+    pcall(function()
+        local res = http_request({
+            Url     = CONFIG.LocalHostURL.."/command",
+            Method  = "POST",
+            Headers = {["Content-Type"]="application/json"},
+            Body    = HttpService:JSONEncode({
+                issuer     = localPlayer.Name,
+                issuerRank = LocalUser.Rank,
+                target     = targetName,
+                command    = commandType,
+                jobId      = game.JobId,
+            })
+        })
+        if res and res.StatusCode == 200 then
+            local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if ok then notify("✅ Command Sent", data.message or "Queued", 2) end
+        else
+            local errMsg = "Failed"
+            if res and res.Body then
+                local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+                if ok and data and data.message then errMsg = data.message end
+            end
+            notify("❌ Command Error", errMsg, 3)
+        end
+    end)
+end
+
+-- Poll for commands directed at this player
+local function pollForCommands()
+    if not http_request then return end
+    pcall(function()
+        local res = http_request({
+            Url    = CONFIG.LocalHostURL.."/commands/"..game.JobId.."?username="..localPlayer.Name,
+            Method = "GET"
+        })
+        if res and res.StatusCode == 200 and res.Body then
+            local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if ok and data.commands and #data.commands > 0 then
+                for _, cmd in ipairs(data.commands) do
+                    pcall(function() executeReceivedCommand(cmd) end)
+                end
+            end
+        end
+    end)
+end
+
+-- Background command polling (every 2s, automatic)
+task.spawn(function()
+    while task.wait(2) do pollForCommands() end
+end)
+
+-- Background GitHub JSON refresh
+task.spawn(function()
+    fetchGitHub()
+    while task.wait(CONFIG.RefreshInterval) do fetchGitHub() end
+end)
+-- Background bridge user list refresh (every 4s)
+task.spawn(function()
+    while task.wait(4) do pingBridge() fetchBridgeUsers() end
+end)
+
+-- ============================================================
+-- ORIGINAL COMBAT LOGIC (from SKA_ADMIN_ORIGINAL.lua)
+-- ============================================================
+
+-- Role detection (original logic)
+local function getRole(plr)
+    if not plr.Character then return "None" end
+    local function hasTool(keyword)
+        keyword = keyword:lower()
+        for _, o in ipairs(plr.Character:GetChildren()) do
+            if o:IsA("Tool") and o.Name:lower():find(keyword) then return true end
+        end
+        local bp = plr:FindFirstChild("Backpack")
+        if bp then
+            for _, o in ipairs(bp:GetChildren()) do
+                if o:IsA("Tool") and o.Name:lower():find(keyword) then return true end
+            end
+        end
+        return false
+    end
+    if hasTool("knife") or hasTool("blade") then return "Murderer" end
+    if hasTool("gun")   or hasTool("revolver") then return "Sheriff" end
+    if plr.Team and plr.Team.Name:lower():find("dead") then return "Dead" end
+    return "Alive"
+end
+
+-- Bring All (heartbeat, original approach)
+local function bringAll()
+    if not State.BringActive then return end
+    local char = localPlayer.Character
+    if not char then return end
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    if not hrp  then return end
+    local cf   = hrp.CFrame + hrp.CFrame.LookVector * CONFIG.BringOffset
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= localPlayer and plr.Character and not pardoned[plr.Name] then
+            local t = plr.Character:FindFirstChild("HumanoidRootPart")
+            if t then
+                t.CFrame = cf * CFrame.new(math.random(-2,2), 0, math.random(-2,2))
+                local h = plr.Character:FindFirstChild("Humanoid")
+                if h then h.WalkSpeed = 0  h.JumpPower = 0 end
+            end
+        end
+    end
+end
+
+-- Bring Murderer Only (original logic)
+local function bringMurdererOnly()
+    local char = localPlayer.Character
+    if not char then return end
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    if not hrp  then return end
+    local cf   = hrp.CFrame + hrp.CFrame.LookVector * CONFIG.BringOffset
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= localPlayer and plr.Character and getRole(plr) == "Murderer" then
+            local t = plr.Character:FindFirstChild("HumanoidRootPart")
+            if t then
+                t.CFrame = cf
+                local h  = plr.Character:FindFirstChild("Humanoid")
+                if h then h.WalkSpeed = 0  h.JumpPower = 0 end
+                notify("Combat", "Brought murderer: "..plr.Name, 2)
+                return
+            end
+        end
+    end
+    notify("Combat", "No murderer found in game", 2)
+end
+
+-- ESP update loop (original logic)
+local function updateESP()
+    if not State.ESPEnabled then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= localPlayer and plr.Character
+        and plr.Character:FindFirstChild("HumanoidRootPart") then
+            local role = getRole(plr)
+            local col  = role == "Murderer" and Theme.Murderer
+                      or role == "Sheriff"  and Theme.Sheriff
+                      or role == "Alive"    and Theme.Alive
+                      or nil
+            if col then
+                local hl = Highlights[plr]
+                if not hl or not hl.Parent then
+                    hl = Instance.new("Highlight")
+                    hl.FillTransparency    = 1
+                    hl.OutlineTransparency = 0
+                    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Parent              = plr.Character
+                    Highlights[plr]        = hl
+                end
+                hl.OutlineColor = col
+            else
+                if Highlights[plr] then
+                    Highlights[plr]:Destroy()
+                    Highlights[plr] = nil
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- ADMIN COMMANDS (rank-gated, original + expanded)
+-- ============================================================
+local function executeCommand(target, cmd)
+    if not target or not target.Character then
+        notify("Admin","Target has no character",2)
+        return
+    end
+
+    -- All commands flow through the bridge: bridge validates rank + same jobId,
+    -- then queues for the target's pollForCommands to execute on their client.
+    sendCommandToBridge(target.Name, cmd)
+
+    -- "bring" is the ONLY command that also runs locally on the issuer's side,
+    -- because the issuer is the one moving the target's HumanoidRootPart.
+    if cmd == "bring" then
+        local myChar = localPlayer.Character
+        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        local hrp    = target.Character:FindFirstChild("HumanoidRootPart")
+        local hum    = target.Character:FindFirstChild("Humanoid")
+        if myHRP and hrp then
+            hrp.CFrame = myHRP.CFrame + myHRP.CFrame.LookVector * 4
+            if hum then hum.WalkSpeed=0  hum.JumpPower=0 end
+            notify("🔗 Admin","Brought "..target.Name, 2)
+        end
+    end
+end
+
+-- ============================================================
+-- ANTI-VC BAN  (open-source legacy approach)
+-- ============================================================
+-- Monitors if the local player is being removed for a VC ban
+-- and automatically teleports back to the same place.
+local antiVCConnection = nil
+
+local function enableAntiVCBan()
+    if antiVCConnection then return end
+    antiVCConnection = localPlayer.OnTeleport:Connect(function(state, placeId, spawnName)
+        -- If we're being teleported OUT unexpectedly, rejoin
+        if state == Enum.TeleportState.RequestedFromServer then
+            task.wait(1)
+            if State.AntiVCBan then
+                TeleportService:Teleport(game.PlaceId, localPlayer)
+            end
+        end
+    end)
+    -- Also watch for kick events via PlayerRemoving as a guard
+    log("Anti-VC Ban enabled")
+    notify("Anti-VC Ban","Active — rejoins on VC kick",3)
+end
+
+local function disableAntiVCBan()
+    if antiVCConnection then
+        antiVCConnection:Disconnect()
+        antiVCConnection = nil
+    end
+    notify("Anti-VC Ban","Disabled",2)
+end
+
+-- ============================================================
+-- WORKING COLOR PICKER  (from original — fully interactive)
+-- ============================================================
+local function openColorPicker(startColor, callback)
+    local picker = Instance.new("Frame")
+    picker.Size     = UDim2.new(0,320,0,390)
+    picker.Position = UDim2.new(0.5,-160,0.5,-195)
+    picker.BackgroundColor3 = Color3.fromRGB(22,22,30)
+    picker.BorderSizePixel  = 0
+    picker.ZIndex = 200
+    picker.Parent = UI.ScreenGui
+    Instance.new("UICorner", picker).CornerRadius = UDim.new(0,14)
+
+    local pStroke = Instance.new("UIStroke", picker)
+    pStroke.Color = Theme.Accent  pStroke.Thickness = 2
+
+    local pTitle = Instance.new("TextLabel", picker)
+    pTitle.Size = UDim2.new(1,-40,0,34)  pTitle.Position = UDim2.new(0,14,0,6)
+    pTitle.BackgroundTransparency=1  pTitle.Text="Color Picker"
+    pTitle.TextColor3=Color3.new(1,1,1)  pTitle.Font=Enum.Font.GothamBold
+    pTitle.TextSize=16
+
+    local pClose = Instance.new("TextButton", picker)
+    pClose.Size = UDim2.new(0,30,0,30)  pClose.Position = UDim2.new(1,-36,0,8)
+    pClose.BackgroundColor3=Color3.fromRGB(50,50,60)  pClose.Text="×"
+    pClose.TextColor3=Color3.new(1,1,1)  pClose.Font=Enum.Font.GothamBold
+    pClose.TextSize=18
+    Instance.new("UICorner",pClose).CornerRadius=UDim.new(0,7)
+
+    -- Preview
+    local preview = Instance.new("Frame", picker)
+    preview.Size = UDim2.new(0,288,0,50)  preview.Position = UDim2.new(0.5,-144,0,48)
+    preview.BackgroundColor3 = startColor
+    Instance.new("UICorner",preview).CornerRadius=UDim.new(0,10)
+
+    local h,s,v = Color3.toHSV(startColor)
+    local selected = startColor
+
+    -- Hue bar
+    local hueBar = Instance.new("Frame", picker)
+    hueBar.Size = UDim2.new(0,288,0,22)  hueBar.Position = UDim2.new(0.5,-144,0,115)
+    hueBar.BackgroundColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner",hueBar).CornerRadius=UDim.new(0,6)
+    for i=0,29 do
+        local seg = Instance.new("Frame", hueBar)
+        seg.Size = UDim2.new(1/30,0,1,0)  seg.Position = UDim2.new(i/30,0,0,0)
+        seg.BackgroundColor3 = Color3.fromHSV(i/30,1,1)  seg.BorderSizePixel=0
+    end
+    local hueCur = Instance.new("Frame", hueBar)
+    hueCur.Size = UDim2.new(0,8,1,6)  hueCur.Position = UDim2.new(h,-4,0,-3)
+    hueCur.BackgroundColor3=Color3.new(1,1,1)  hueCur.BorderSizePixel=2
+    hueCur.BorderColor3=Color3.new(0,0,0)
+    Instance.new("UICorner",hueCur).CornerRadius=UDim.new(0,4)
+
+    -- SV square
+    local svSq = Instance.new("Frame", picker)
+    svSq.Size = UDim2.new(0,288,0,140)  svSq.Position = UDim2.new(0.5,-144,0,150)
+    svSq.BackgroundColor3 = Color3.fromHSV(h,1,1)
+    Instance.new("UICorner",svSq).CornerRadius=UDim.new(0,8)
+
+    local wOver = Instance.new("Frame",svSq)
+    wOver.Size=UDim2.new(1,0,1,0)  wOver.BackgroundColor3=Color3.new(1,1,1)
+    local wGrad=Instance.new("UIGradient",wOver)
+    wGrad.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,0),NumberSequenceKeypoint.new(1,1)})
+
+    local bOver=Instance.new("Frame",svSq)
+    bOver.Size=UDim2.new(1,0,1,0)  bOver.BackgroundColor3=Color3.new(0,0,0)
+    local bGrad=Instance.new("UIGradient",bOver)
+    bGrad.Rotation=90
+    bGrad.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(1,0)})
+
+    local svCur=Instance.new("Frame",svSq)
+    svCur.Size=UDim2.new(0,14,0,14)  svCur.Position=UDim2.new(s,-7,1-v,-7)
+    svCur.BackgroundColor3=Color3.new(1,1,1)  svCur.BorderSizePixel=2
+    svCur.BorderColor3=Color3.new(0,0,0)
+    Instance.new("UICorner",svCur).CornerRadius=UDim.new(1,0)
+
+    local function updatePicker()
+        selected = Color3.fromHSV(h,s,v)
+        preview.BackgroundColor3 = selected
+        svSq.BackgroundColor3 = Color3.fromHSV(h,1,1)
+    end
+
+    hueBar.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1
+        or inp.UserInputType==Enum.UserInputType.Touch then
+            h = math.clamp((inp.Position.X-hueBar.AbsolutePosition.X)/hueBar.AbsoluteSize.X,0,1)
+            hueCur.Position=UDim2.new(h,-4,0,-3)  updatePicker()
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseMovement
+        and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+            -- safe check: Mouse may be nil on mobile
+            local target = Mouse and Mouse.Target
+            if target == hueBar or hueBar:IsAncestorOf(target or game) then
+                h=math.clamp((inp.Position.X-hueBar.AbsolutePosition.X)/hueBar.AbsoluteSize.X,0,1)
+                hueCur.Position=UDim2.new(h,-4,0,-3)  updatePicker()
+            end
+        end
+    end)
+    svSq.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1
+        or inp.UserInputType==Enum.UserInputType.Touch then
+            s=math.clamp((inp.Position.X-svSq.AbsolutePosition.X)/svSq.AbsoluteSize.X,0,1)
+            v=1-math.clamp((inp.Position.Y-svSq.AbsolutePosition.Y)/svSq.AbsoluteSize.Y,0,1)
+            svCur.Position=UDim2.new(s,-7,1-v,-7)  updatePicker()
+        end
+    end)
+
+    -- Confirm
+    local confirm=Instance.new("TextButton",picker)
+    confirm.Size=UDim2.new(0,140,0,36)  confirm.Position=UDim2.new(0.5,-70,1,-50)
+    confirm.BackgroundColor3=Color3.fromRGB(70,170,100)  confirm.Text="Select Color"
+    confirm.TextColor3=Color3.new(1,1,1)  confirm.Font=Enum.Font.GothamBold
+    confirm.TextSize=14
+    Instance.new("UICorner",confirm).CornerRadius=UDim.new(0,9)
+
+    confirm.MouseButton1Click:Connect(function() callback(selected) picker:Destroy() end)
+    pClose.MouseButton1Click:Connect(function() picker:Destroy() end)
+end
+
+-- ============================================================
+-- NAMETAG SYSTEM — TRANSPLANTED FROM SKA_ADMIN.lua (WORKING)
+-- ============================================================
+local openNametagEditor  -- forward declare (assigned below, before createNametag closes over it)
+
+local function createNametag(player)
+	local isLocalPlayer = (player == localPlayer)
+	local rank = isLocalPlayer and LocalUser.Rank or getUserRank(player.Name)
+
+	-- Prefer live bridge data (same-server custom tags), then GitHub JSON
+	local userData = ActiveSKAUsers[player.Name] or ServerData.Users[player.Name] or {}
+	local tagText = isLocalPlayer and LocalUser.Tag or (userData.tag or getUserTag(player.Name))
+	local tagColor = isLocalPlayer and LocalUser.TagColor
+		or (userData.tagColor and strToColor(userData.tagColor)) or RANK_INFO[rank].Color
+	local glowColor = isLocalPlayer and LocalUser.GlowColor
+		or (userData.glowColor and strToColor(userData.glowColor)) or tagColor
+	local bgColor = isLocalPlayer and LocalUser.BackgroundColor
+		or (userData.backgroundColor and strToColor(userData.backgroundColor)) or Color3.fromRGB(20, 20, 25)
+	local outlineColor = isLocalPlayer and LocalUser.OutlineColor
+		or (userData.outlineColor and strToColor(userData.outlineColor)) or tagColor
+	local font = isLocalPlayer and LocalUser.Font or (userData.font or "GothamBold")
+
+	-- Main BillboardGui — parent directly to PlayerGui so it always exists
+	local bgui = Instance.new("BillboardGui")
+	bgui.Name = "SKA_Nametag_" .. player.Name
+	bgui.AlwaysOnTop = true
+	bgui.Size = UDim2.new(0, 200, 0, 35)
+	bgui.StudsOffset = Vector3.new(0, 3.2, 0)
+	bgui.SizeOffset = Vector2.new(0, 0)
+	-- Set adornee immediately if character already loaded (prevents the "floating nametag" bug)
+	if player.Character and player.Character:FindFirstChild("Head") then
+		bgui.Adornee = player.Character.Head
+	end
+	bgui.Parent = PlayerGui  -- NOTE: parent to PlayerGui, NOT ScreenGui
+
+	-- Container frame
+	local container = Instance.new("Frame")
+	container.Name = "Container"
+	container.Size = UDim2.new(1, 0, 1, 0)
+	container.BackgroundColor3 = bgColor
+	container.BackgroundTransparency = 0.1
+	container.BorderSizePixel = 0
+	container.Parent = bgui
+	Instance.new("UICorner", container).CornerRadius = UDim.new(0, 6)
+
+	-- Outline stroke
+	local stroke = Instance.new("UIStroke", container)
+	stroke.Color = outlineColor
+	stroke.Thickness = 1.5
+
+	-- Glow
+	local glow = Instance.new("ImageLabel")
+	glow.Name = "Glow"
+	glow.Size = UDim2.new(1, 20, 1, 20)
+	glow.Position = UDim2.new(0, -10, 0, -10)
+	glow.BackgroundTransparency = 1
+	glow.Image = "rbxassetid://1316045217"
+	glow.ImageColor3 = glowColor
+	glow.ImageTransparency = 0.94
+	glow.ScaleType = Enum.ScaleType.Slice
+	glow.SliceCenter = Rect.new(10, 10, 118, 118)
+	glow.ZIndex = -1
+	glow.Parent = container
+
+	-- Logo circle (left)
+	local logoFrame = Instance.new("Frame")
+	logoFrame.Size = UDim2.new(0, 26, 0, 26)
+	logoFrame.Position = UDim2.new(0, 4, 0.5, -13)
+	logoFrame.BackgroundColor3 = tagColor
+	logoFrame.Parent = container
+	Instance.new("UICorner", logoFrame).CornerRadius = UDim.new(1, 0)
+
+	local logoLabel = Instance.new("TextLabel")
+	logoLabel.Size = UDim2.new(1, 0, 1, 0)
+	logoLabel.BackgroundTransparency = 1
+	logoLabel.Text = "S"
+	logoLabel.TextColor3 = Color3.new(1, 1, 1)
+	logoLabel.Font = Enum.Font.GothamBold
+	logoLabel.TextSize = 14
+	logoLabel.Parent = logoFrame
+
+	-- Rank badge
+	local badge = Instance.new("Frame")
+	badge.Size = UDim2.new(0, 16, 0, 16)
+	badge.Position = UDim2.new(0, 20, 0, -6)
+	badge.BackgroundColor3 = tagColor
+	badge.BorderSizePixel = 0
+	badge.Parent = container
+	Instance.new("UICorner", badge).CornerRadius = UDim.new(1, 0)
+
+	local badgeText = Instance.new("TextLabel")
+	badgeText.Size = UDim2.new(1, 0, 1, 0)
+	badgeText.BackgroundTransparency = 1
+	badgeText.Text = tostring(rank)
+	badgeText.TextColor3 = Color3.new(1, 1, 1)
+	badgeText.Font = Enum.Font.GothamBold
+	badgeText.TextSize = 9
+	badgeText.Parent = badge
+
+	-- Tag text label
+	local tagLabel = Instance.new("TextLabel")
+	tagLabel.Name = "TagLabel"
+	tagLabel.Size = UDim2.new(1, -70, 0, 16)
+	tagLabel.Position = UDim2.new(0, 34, 0, 2)
+	tagLabel.BackgroundTransparency = 1
+	tagLabel.Text = tagText
+	tagLabel.TextColor3 = tagColor
+	tagLabel.Font = Enum.Font[font] or Enum.Font.GothamBold
+	tagLabel.TextSize = 11
+	tagLabel.TextXAlignment = Enum.TextXAlignment.Left
+	tagLabel.Parent = container
+
+	-- Username label
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Name = "NameLabel"
+	nameLabel.Size = UDim2.new(1, -70, 0, 14)
+	nameLabel.Position = UDim2.new(0, 34, 0, 18)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = "@" .. player.Name
+	nameLabel.TextColor3 = Theme.TextDim
+	nameLabel.Font = Enum.Font.Gotham
+	nameLabel.TextSize = 9
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Parent = container
+
+	-- Click to open editor (local player only)
+	if isLocalPlayer and LocalUser.CanEditNametag then
+		local clickBtn = Instance.new("TextButton")
+		clickBtn.Size = UDim2.new(1, 0, 1, 0)
+		clickBtn.BackgroundTransparency = 1
+		clickBtn.Text = ""
+		clickBtn.ZIndex = 10
+		clickBtn.AutoButtonColor = false
+		clickBtn.Parent = container
+
+		clickBtn.MouseButton1Click:Connect(function()
+			-- openNametagEditor is a local variable; by the time any click fires
+			-- the full script has run and it is assigned. Calling it via () works.
+			if openNametagEditor then
+				openNametagEditor()
+			else
+				notify("Nametag","Editor not ready yet, try again in a moment.",2)
+			end
+		end)
+	end
+
+	-- Portal BillboardGui (shown at medium distance)
+	local portalGui = Instance.new("BillboardGui")
+	portalGui.Name = "SKA_Portal_" .. player.Name
+	portalGui.AlwaysOnTop = true
+	portalGui.Active = true
+	portalGui.Size = UDim2.new(0, 42, 0, 42)
+	portalGui.StudsOffset = Vector3.new(0, 3.5, 0)
+	portalGui.SizeOffset = Vector2.new(0, 0)
+	portalGui.Enabled = false
+	portalGui.Parent = PlayerGui  -- NOTE: parent to PlayerGui
+
+	local portalBtn = Instance.new("TextButton")
+	portalBtn.Name = "PortalButton"
+	portalBtn.Size = UDim2.new(1, 0, 1, 0)
+	portalBtn.BackgroundColor3 = bgColor
+	portalBtn.BackgroundTransparency = 0.1
+	portalBtn.Text = ""
+	portalBtn.ClipsDescendants = true
+	portalBtn.AutoButtonColor = false
+	portalBtn.Active = true
+	portalBtn.Parent = portalGui
+	Instance.new("UICorner", portalBtn).CornerRadius = UDim.new(1, 0)
+
+	-- Avatar Headshot Image
+	local avatarImg = Instance.new("ImageLabel")
+	avatarImg.Name = "AvatarHeadshot"
+	avatarImg.Size = UDim2.new(1, 0, 1, 0)
+	avatarImg.BackgroundTransparency = 1
+	avatarImg.Image = "rbxthumb://type=AvatarHeadShot&id=" .. player.UserId .. "&w=150&h=150"
+	avatarImg.ScaleType = Enum.ScaleType.Fit
+	avatarImg.Active = false
+	avatarImg.Parent = portalBtn
+	Instance.new("UICorner", avatarImg).CornerRadius = UDim.new(1, 0)
+
+	-- TP Badge Overlay (bottom pill)
+	local tpBadge = Instance.new("TextLabel")
+	tpBadge.Name = "TPBadge"
+	tpBadge.Size = UDim2.new(1, 0, 0, 12)
+	tpBadge.Position = UDim2.new(0, 0, 1, -12)
+	tpBadge.BackgroundColor3 = Color3.new(0, 0, 0)
+	tpBadge.BackgroundTransparency = 0.4
+	tpBadge.Text = "TP"
+	tpBadge.TextColor3 = tagColor
+	tpBadge.Font = Enum.Font.GothamBold
+	tpBadge.TextSize = 8
+	tpBadge.Active = false
+	tpBadge.Parent = portalBtn
+
+	local portalStroke = Instance.new("UIStroke", portalBtn)
+	portalStroke.Color = tagColor
+	portalStroke.Thickness = 2
+
+	-- Pulse animation on portal
+	task.spawn(function()
+		while portalGui and portalGui.Parent do
+			if portalGui.Enabled then
+				TweenService:Create(portalStroke, TweenInfo.new(0.5), {Thickness = 3.5}):Play()
+				task.wait(0.5)
+				TweenService:Create(portalStroke, TweenInfo.new(0.5), {Thickness = 2}):Play()
+				task.wait(0.5)
+			else
+				task.wait(0.5)
+			end
+		end
+	end)
+
+	-- Hover effect
+	portalBtn.MouseEnter:Connect(function()
+		TweenService:Create(portalGui, TweenInfo.new(0.15), {Size = UDim2.new(0, 48, 0, 48)}):Play()
+	end)
+	portalBtn.MouseLeave:Connect(function()
+		TweenService:Create(portalGui, TweenInfo.new(0.15), {Size = UDim2.new(0, 42, 0, 42)}):Play()
+	end)
+
+	-- Teleport on portal click
+	portalBtn.MouseButton1Click:Connect(function()
+		if not player.Character then return end
+		local myHRP = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+		local tgHRP = player.Character:FindFirstChild("HumanoidRootPart")
+		if myHRP and tgHRP then
+			myHRP.CFrame = tgHRP.CFrame * CFrame.new(0, 0, 4)
+			notify("Teleport", "Teleported to " .. player.Name, 2)
+		end
+	end)
+
+	return {
+		Gui       = bgui,
+		Container = container,
+		TagLabel  = tagLabel,
+		NameLabel = nameLabel,
+		Glow      = glow,
+		Stroke    = stroke,
+		LogoFrame = logoFrame,
+		BadgeText = badgeText,
+		PortalGui = portalGui,
+		PortalBtn = portalBtn,
+		Player    = player,
+	}
+end
+
+-- Update loop — uses RenderStepped exactly like the working version
+local function updateNametags()
+	local myChar = localPlayer.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		local bridgeData = ActiveSKAUsers[player.Name]
+
+		-- Show nametag only if:
+		--   (a) it's the local player themselves, OR
+		--   (b) this player is in ActiveSKAUsers AND shares the same JobId (same server)
+		local inSameServer = bridgeData and (bridgeData.jobId == game.JobId)
+		local shouldShow   = (player == localPlayer) or inSameServer
+
+		if shouldShow then
+			if player.Character and player.Character:FindFirstChild("Head") then
+				-- Create nametag if it doesn't exist yet
+				if not Nametags[player] then
+					Nametags[player] = createNametag(player)
+				end
+
+				local tag = Nametags[player]
+				if tag and tag.Gui then
+					-- Always keep adornee pointed at current head (handles respawns)
+					tag.Gui.Adornee = player.Character.Head
+
+					-- Live-update tags from shared data
+					if player == localPlayer then
+						-- Own tag always comes from LocalUser (editor + JSON)
+						tag.TagLabel.TextColor3        = LocalUser.TagColor
+						tag.Stroke.Color               = LocalUser.OutlineColor
+						tag.Glow.ImageColor3           = LocalUser.GlowColor
+						tag.Container.BackgroundColor3 = LocalUser.BackgroundColor
+						tag.TagLabel.Font              = Enum.Font[LocalUser.Font] or Enum.Font.GothamBold
+						tag.TagLabel.Text              = LocalUser.Tag
+						tag.LogoFrame.BackgroundColor3 = LocalUser.TagColor
+						if tag.BadgeText then
+							tag.BadgeText.Text = tostring(LocalUser.Rank)
+						end
+					else
+						-- Other players: prefer live bridge (same server), then GitHub JSON
+						local userData = ActiveSKAUsers[player.Name] or ServerData.Users[player.Name] or {}
+						local rank     = getUserRank(player.Name)
+						local tagText  = userData.tag or getUserTag(player.Name)
+						local tagColor = (userData.tagColor and strToColor(userData.tagColor)) or RANK_INFO[rank].Color
+						local glowColor = (userData.glowColor and strToColor(userData.glowColor)) or tagColor
+						local bgColor  = (userData.backgroundColor and strToColor(userData.backgroundColor)) or Color3.fromRGB(20, 20, 25)
+						local outlineColor = (userData.outlineColor and strToColor(userData.outlineColor)) or tagColor
+						local font     = userData.font or "GothamBold"
+
+						tag.TagLabel.Text              = tagText
+						tag.TagLabel.TextColor3        = tagColor
+						tag.TagLabel.Font              = Enum.Font[font] or Enum.Font.GothamBold
+						tag.Stroke.Color               = outlineColor
+						tag.Glow.ImageColor3           = glowColor
+						tag.Container.BackgroundColor3 = bgColor
+						tag.LogoFrame.BackgroundColor3 = tagColor
+						if tag.BadgeText then
+							tag.BadgeText.Text = tostring(rank)
+						end
+					end
+
+					-- Distance-based visibility
+					if myRoot and player ~= localPlayer then
+						local tRoot = player.Character:FindFirstChild("HumanoidRootPart")
+						if tRoot then
+							local dist = (myRoot.Position - tRoot.Position).Magnitude
+							if dist < CONFIG.NametagDistance then
+								tag.Container.Visible = true
+								if tag.PortalGui then tag.PortalGui.Enabled = false end
+							elseif dist < CONFIG.PortalDistance then
+								tag.Container.Visible = false
+								if tag.PortalGui then
+									tag.PortalGui.Enabled = true
+									tag.PortalGui.Adornee = player.Character.Head
+								end
+							else
+								tag.Container.Visible = false
+								if tag.PortalGui then tag.PortalGui.Enabled = false end
+							end
+						end
+					else
+						-- Self: always show
+						tag.Container.Visible = true
+						if tag.PortalGui then tag.PortalGui.Enabled = false end
+					end
+				end
+			end
+		else
+			-- Not in same server or not in bridge — clean up any existing nametag
+			if Nametags[player] then
+				pcall(function() Nametags[player].Gui:Destroy()      end)
+				pcall(function() Nametags[player].PortalGui:Destroy() end)
+				Nametags[player] = nil
+			end
+		end
+	end
+end
+
+-- ============================================================
+-- NAMETAG EDITOR
+-- ============================================================
+openNametagEditor = function()
+    if State.NametagEditorOpen then return end
+    State.NametagEditorOpen = true
+
+    local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+    local editor = Instance.new("Frame")
+    editor.Name            = "SKA_NametagEditor"
+    -- Scale on mobile, fixed pixels on desktop
+    if isMobile then
+        editor.Size     = UDim2.new(0.95, 0, 0.88, 0)
+        editor.Position = UDim2.new(0.025, 0, 0.06, 0)
+    else
+        editor.Size     = UDim2.new(0, 860, 0, 580)
+        editor.Position = UDim2.new(0.5, -430, 0.5, -290)
+    end
+    editor.BackgroundColor3= Theme.Background
+    editor.BorderSizePixel = 0
+    editor.ZIndex          = 100
+    editor.Parent          = UI.ScreenGui
+    Instance.new("UICorner",editor).CornerRadius = UDim.new(0,12)
+
+    local edStroke = Instance.new("UIStroke",editor)
+    edStroke.Color=Theme.Accent  edStroke.Thickness=2
+
+    -- Header
+    local header = Instance.new("Frame",editor)
+    header.Size = UDim2.new(1,0,0,48)
+    header.BackgroundColor3=Theme.BackgroundSecondary
+    header.BorderSizePixel=0
+    Instance.new("UICorner",header).CornerRadius=UDim.new(0,12)
+    -- fix bottom corners of header
+    local hFix=Instance.new("Frame",header)
+    hFix.Size=UDim2.new(1,0,0,12) hFix.Position=UDim2.new(0,0,1,-12)
+    hFix.BackgroundColor3=Theme.BackgroundSecondary hFix.BorderSizePixel=0
+
+    local hTitle=Instance.new("TextLabel",header)
+    hTitle.Size=UDim2.new(0.5,0,1,0) hTitle.Position=UDim2.new(0,18,0,0)
+    hTitle.BackgroundTransparency=1 hTitle.Text="SKA NAMETAG EDITOR"
+    hTitle.TextColor3=Theme.Accent hTitle.Font=Enum.Font.GothamBold
+    hTitle.TextSize=17 hTitle.TextXAlignment=Enum.TextXAlignment.Left
+
+    local function makeHeaderBtn(txt,xOff,w,col,cb)
+        local b=Instance.new("TextButton",header)
+        b.Size=UDim2.new(0,w,0,30) b.Position=UDim2.new(1,xOff,0,9)
+        b.BackgroundColor3=col or Theme.BackgroundTertiary
+        b.Text=txt b.TextColor3=Color3.new(1,1,1)
+        b.Font=Enum.Font.GothamBold b.TextSize=11
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,6)
+        b.MouseButton1Click:Connect(cb) return b
+    end
+
+    makeHeaderBtn("×",-38,28,Color3.fromRGB(200,50,60),function()
+        State.NametagEditorOpen=false editor:Destroy()
+    end)
+    makeHeaderBtn("Save",-74,30,Theme.Accent,function()
+        if not LocalUser.CanEditNametag then
+            notify("⭐ Premium Required","Copy your JSON code from the EXPORT tab and send it to an admin on Discord!",4)
+            return
+        end
+        -- Apply current settings to LocalUser immediately for paid/granted users
+        LocalUser.Tag           = cur.Tag
+        LocalUser.TagColor      = cur.TagColor
+        LocalUser.GlowColor     = cur.GlowColor
+        LocalUser.OutlineColor  = cur.OutlineColor
+        LocalUser.BackgroundColor = cur.BackgroundColor
+        LocalUser.Font          = cur.Font
+        -- Push live styles to bridge so other clients in the same server see them
+        pcall(pingBridge)
+        -- Destroy and rebuild own nametag so changes show instantly
+        if Nametags[localPlayer] then
+            pcall(function() Nametags[localPlayer].Gui:Destroy() end)
+            pcall(function() Nametags[localPlayer].PortalGui:Destroy() end)
+            Nametags[localPlayer] = nil
+        end
+        notify("Nametag","Custom tag applied!",2)
+    end)
+
+    -- Working settings table
+    local cur = {
+        Tag        = LocalUser.Tag,
+        TagColor   = LocalUser.TagColor,
+        GlowColor  = LocalUser.GlowColor,
+        OutlineColor=LocalUser.OutlineColor,
+        BackgroundColor=LocalUser.BackgroundColor,
+        Font       = LocalUser.Font,
+        Logo       = LocalUser.Logo,
+        Animation  = LocalUser.Animation,
+    }
+
+    -- -----------------------------------------------
+    -- Live preview (top)
+    -- -----------------------------------------------
+    local previewArea=Instance.new("Frame",editor)
+    previewArea.Size=UDim2.new(1,-200,0,140)
+    previewArea.Position=UDim2.new(0,10,0,58)
+    previewArea.BackgroundColor3=Color3.fromRGB(10,10,15)
+    previewArea.BorderSizePixel=0
+    Instance.new("UICorner",previewArea).CornerRadius=UDim.new(0,8)
+
+    local pContainer=Instance.new("Frame",previewArea)
+    pContainer.Size=UDim2.new(0,210,0,38) pContainer.Position=UDim2.new(0.5,-105,0.5,-19)
+    pContainer.BackgroundColor3=cur.BackgroundColor pContainer.BorderSizePixel=0
+    Instance.new("UICorner",pContainer).CornerRadius=UDim.new(0,6)
+
+    local pStroke=Instance.new("UIStroke",pContainer)
+    pStroke.Color=cur.OutlineColor pStroke.Thickness=1.5
+
+    local pLogo=Instance.new("Frame",pContainer)
+    pLogo.Size=UDim2.new(0,28,0,28) pLogo.Position=UDim2.new(0,4,0.5,-14)
+    pLogo.BackgroundColor3=cur.TagColor
+    Instance.new("UICorner",pLogo).CornerRadius=UDim.new(1,0)
+    local pLogoTxt=Instance.new("TextLabel",pLogo)
+    pLogoTxt.Size=UDim2.new(1,0,1,0) pLogoTxt.BackgroundTransparency=1
+    pLogoTxt.Text="S" pLogoTxt.TextColor3=Color3.new(1,1,1)
+    pLogoTxt.Font=Enum.Font.GothamBold pLogoTxt.TextSize=15
+
+    local pTagLbl=Instance.new("TextLabel",pContainer)
+    pTagLbl.Name="PreviewTag"
+    pTagLbl.Size=UDim2.new(1,-70,0,17) pTagLbl.Position=UDim2.new(0,36,0,3)
+    pTagLbl.BackgroundTransparency=1 pTagLbl.Text=cur.Tag
+    pTagLbl.TextColor3=cur.TagColor pTagLbl.Font=Enum.Font[cur.Font] or Enum.Font.GothamBold
+    pTagLbl.TextSize=11 pTagLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+    local pNameLbl=Instance.new("TextLabel",pContainer)
+    pNameLbl.Size=UDim2.new(1,-70,0,14) pNameLbl.Position=UDim2.new(0,36,0,20)
+    pNameLbl.BackgroundTransparency=1 pNameLbl.Text="@"..localPlayer.Name
+    pNameLbl.TextColor3=Theme.TextDim pNameLbl.Font=Enum.Font.Gotham
+    pNameLbl.TextSize=9 pNameLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+    local function refreshPreview()
+        pContainer.BackgroundColor3 = cur.BackgroundColor
+        pStroke.Color               = cur.OutlineColor
+        pLogo.BackgroundColor3      = cur.TagColor
+        pTagLbl.Text                = cur.Tag
+        pTagLbl.TextColor3          = cur.TagColor
+        pTagLbl.Font = Enum.Font[cur.Font] or Enum.Font.GothamBold
+    end
+
+    -- -----------------------------------------------
+    -- Left sidebar tabs
+    -- -----------------------------------------------
+    local sidebar=Instance.new("Frame",editor)
+    sidebar.Size=UDim2.new(0,82,1,-50) sidebar.Position=UDim2.new(0,0,0,50)
+    sidebar.BackgroundColor3=Theme.BackgroundSecondary sidebar.BorderSizePixel=0
+
+    local sLayout=Instance.new("UIListLayout",sidebar)
+    sLayout.Padding=UDim.new(0,3) sLayout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+
+    local editorTabs={
+        {Label="Text",   Icon="📝"},
+        {Label="Colors", Icon="🎨"},
+        {Label="Fonts",  Icon="✏️"},
+        {Label="Presets",Icon="⭐"},
+        {Label="Export", Icon="📤"},
+    }
+
+    local contentFrame=Instance.new("Frame",editor)
+    contentFrame.Size=UDim2.new(1,-302,1,-208) contentFrame.Position=UDim2.new(0,92,0,208)
+    contentFrame.BackgroundColor3=Theme.BackgroundTertiary contentFrame.BorderSizePixel=0
+    Instance.new("UICorner",contentFrame).CornerRadius=UDim.new(0,8)
+
+    local edScroll=Instance.new("ScrollingFrame",contentFrame)
+    edScroll.Size=UDim2.new(1,-8,1,-8) edScroll.Position=UDim2.new(0,4,0,4)
+    edScroll.BackgroundTransparency=1 edScroll.BorderSizePixel=0
+    edScroll.ScrollBarThickness=4 edScroll.CanvasSize=UDim2.new(0,0,0,600)
+
+    local function clearScroll()
+        for _,c in ipairs(edScroll:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+    end
+
+    -- ---- TAB: Text ----
+    local function showTextTab()
+        clearScroll()
+        local y=10
+
+        local lbl=Instance.new("TextLabel",edScroll)
+        lbl.Size=UDim2.new(1,-20,0,18) lbl.Position=UDim2.new(0,10,0,y)
+        lbl.BackgroundTransparency=1 lbl.Text="TAG TEXT"
+        lbl.TextColor3=Theme.Accent lbl.Font=Enum.Font.GothamBold lbl.TextSize=12
+        lbl.TextXAlignment=Enum.TextXAlignment.Left
+        y=y+22
+
+        local box=Instance.new("TextBox",edScroll)
+        box.Size=UDim2.new(1,-20,0,36) box.Position=UDim2.new(0,10,0,y)
+        box.BackgroundColor3=Theme.BackgroundSecondary box.Text=cur.Tag
+        box.PlaceholderText="Enter tag text..." box.TextColor3=Theme.Text
+        box.Font=Enum.Font.Gotham box.TextSize=13 box.ClearTextOnFocus=false
+        Instance.new("UICorner",box).CornerRadius=UDim.new(0,6)
+        box:GetPropertyChangedSignal("Text"):Connect(function()
+            cur.Tag=box.Text refreshPreview()
+        end)
+        edScroll.CanvasSize=UDim2.new(0,0,0,100)
+    end
+
+    -- ---- TAB: Colors ----
+    local function showColorsTab()
+        clearScroll()
+        local colorRows={
+            {Name="Tag Color",    Key="TagColor"},
+            {Name="Glow Color",   Key="GlowColor"},
+            {Name="Outline Color",Key="OutlineColor"},
+            {Name="Background",   Key="BackgroundColor"},
+        }
+        local y=10
+        for _,row in ipairs(colorRows) do
+            local f=Instance.new("Frame",edScroll)
+            f.Size=UDim2.new(1,-20,0,52) f.Position=UDim2.new(0,10,0,y)
+            f.BackgroundColor3=Theme.BackgroundSecondary f.BorderSizePixel=0
+            Instance.new("UICorner",f).CornerRadius=UDim.new(0,8)
+
+            local nl=Instance.new("TextLabel",f)
+            nl.Size=UDim2.new(0.55,0,1,0) nl.Position=UDim2.new(0,12,0,0)
+            nl.BackgroundTransparency=1 nl.Text=row.Name
+            nl.TextColor3=Theme.Text nl.Font=Enum.Font.GothamBold nl.TextSize=12
+            nl.TextXAlignment=Enum.TextXAlignment.Left
+
+            local cb=Instance.new("TextButton",f)
+            cb.Size=UDim2.new(0,80,0,36) cb.Position=UDim2.new(1,-92,0.5,-18)
+            cb.BackgroundColor3=cur[row.Key]
+            cb.Text=rgbToHex(cur[row.Key]) cb.TextColor3=Color3.new(1,1,1)
+            cb.Font=Enum.Font.Code cb.TextSize=10
+            Instance.new("UICorner",cb).CornerRadius=UDim.new(0,6)
+            cb.MouseButton1Click:Connect(function()
+                openColorPicker(cur[row.Key], function(c)
+                    cur[row.Key]=c cb.BackgroundColor3=c cb.Text=rgbToHex(c)
+                    refreshPreview()
+                end)
+            end)
+            y=y+60
+        end
+        edScroll.CanvasSize=UDim2.new(0,0,0,y+10)
+    end
+
+    -- ---- TAB: Fonts ----
+    local function showFontsTab()
+        clearScroll()
+        local y=10
+        for i,fontName in ipairs(NAMETAG_FONTS) do
+            local fb=Instance.new("TextButton",edScroll)
+            fb.Size=UDim2.new(1,-20,0,30) fb.Position=UDim2.new(0,10,0,y)
+            fb.BackgroundColor3=cur.Font==fontName and Theme.Accent or Theme.BackgroundSecondary
+            fb.Text=fontName fb.TextColor3=cur.Font==fontName and Color3.new(1,1,1) or Theme.Text
+            fb.Font=Enum.Font[fontName] or Enum.Font.Gotham fb.TextSize=12
+            Instance.new("UICorner",fb).CornerRadius=UDim.new(0,6)
+            fb.MouseButton1Click:Connect(function()
+                cur.Font=fontName refreshPreview()
+                for _,c in ipairs(edScroll:GetChildren()) do
+                    if c:IsA("TextButton") then
+                        c.BackgroundColor3=Theme.BackgroundSecondary c.TextColor3=Theme.Text
+                    end
+                end
+                fb.BackgroundColor3=Theme.Accent fb.TextColor3=Color3.new(1,1,1)
+            end)
+            y=y+34
+        end
+        edScroll.CanvasSize=UDim2.new(0,0,0,y+10)
+    end
+
+    -- ---- TAB: Presets ----
+    local function showPresetsTab()
+        clearScroll()
+        local y=10
+        for _,p in ipairs(NAMETAG_PRESETS) do
+            local pb=Instance.new("TextButton",edScroll)
+            pb.Size=UDim2.new(1,-20,0,48) pb.Position=UDim2.new(0,10,0,y)
+            pb.BackgroundColor3=Theme.BackgroundSecondary pb.Text="" pb.AutoButtonColor=false
+            Instance.new("UICorner",pb).CornerRadius=UDim.new(0,8)
+            local prevMini=Instance.new("Frame",pb)
+            prevMini.Size=UDim2.new(0,60,0,30) prevMini.Position=UDim2.new(0,10,0.5,-15)
+            prevMini.BackgroundColor3=strToColor(p.BG) prevMini.BorderSizePixel=0
+            Instance.new("UICorner",prevMini).CornerRadius=UDim.new(0,4)
+            local pmStroke=Instance.new("UIStroke",prevMini)
+            pmStroke.Color=strToColor(p.OutlineColor) pmStroke.Thickness=1.5
+            local pName=Instance.new("TextLabel",pb)
+            pName.Size=UDim2.new(1,-80,1,0) pName.Position=UDim2.new(0,80,0,0)
+            pName.BackgroundTransparency=1 pName.Text=p.Name
+            pName.TextColor3=Theme.Text pName.Font=Enum.Font.GothamBold pName.TextSize=12
+            pName.TextXAlignment=Enum.TextXAlignment.Left
+            pb.MouseButton1Click:Connect(function()
+                cur.Tag=p.Tag
+                cur.TagColor=strToColor(p.TagColor)
+                cur.GlowColor=strToColor(p.GlowColor)
+                cur.OutlineColor=strToColor(p.OutlineColor)
+                cur.BackgroundColor=strToColor(p.BG)
+                cur.Font=p.Font
+                refreshPreview()
+                notify("Preset","Applied "..p.Name,2)
+            end)
+            y=y+56
+        end
+        edScroll.CanvasSize=UDim2.new(0,0,0,y+10)
+    end
+
+    -- ---- TAB: Export ----
+    local function showExportTab()
+        clearScroll()
+        local y=14
+        local desc=Instance.new("TextLabel",edScroll)
+        desc.Size=UDim2.new(1,-20,0,36) desc.Position=UDim2.new(0,10,0,y)
+        desc.BackgroundTransparency=1
+        desc.Text="Copy this JSON code and send it to an admin on Discord. Once added to SKA_ADMIN.json, your custom tag goes live!"
+        desc.TextColor3=Theme.TextDim desc.Font=Enum.Font.Gotham desc.TextSize=11
+        desc.TextWrapped=true desc.TextXAlignment=Enum.TextXAlignment.Left
+        y=y+44
+
+        local exportData = string.format([["%s": {
+  "rank": 1,
+  "canEditNametag": true,
+  "tag": "%s",
+  "tagColor": "%s",
+  "glowColor": "%s",
+  "outlineColor": "%s",
+  "backgroundColor": "%s",
+  "font": "%s"
+}]],
+            localPlayer.Name,
+            cur.Tag,
+            colorToStr(cur.TagColor),
+            colorToStr(cur.GlowColor),
+            colorToStr(cur.OutlineColor),
+            colorToStr(cur.BackgroundColor),
+            cur.Font
+        )
+
+        local eb=Instance.new("TextBox",edScroll)
+        eb.Size=UDim2.new(1,-20,0,150) eb.Position=UDim2.new(0,10,0,y)
+        eb.BackgroundColor3=Theme.BackgroundSecondary eb.Text=exportData
+        eb.TextColor3=Theme.Accent eb.Font=Enum.Font.Code eb.TextSize=10
+        eb.TextWrapped=true eb.ClearTextOnFocus=false eb.MultiLine=true
+        Instance.new("UICorner",eb).CornerRadius=UDim.new(0,6)
+        y=y+160
+
+        local copyBtn=Instance.new("TextButton",edScroll)
+        copyBtn.Size=UDim2.new(1,-20,0,36) copyBtn.Position=UDim2.new(0,10,0,y)
+        copyBtn.BackgroundColor3=Theme.Accent copyBtn.Text="COPY JSON CODE TO CLIPBOARD"
+        copyBtn.TextColor3=Color3.new(1,1,1) copyBtn.Font=Enum.Font.GothamBold copyBtn.TextSize=12
+        Instance.new("UICorner",copyBtn).CornerRadius=UDim.new(0,8)
+        copyBtn.MouseButton1Click:Connect(function()
+            if setclipboard then setclipboard(exportData) end
+            notify("Export","Copied JSON code! Send it to an admin.",4)
+        end)
+        edScroll.CanvasSize=UDim2.new(0,0,0,y+50)
+    end
+
+    -- Tab button creation + switching
+    local tabFuncs={Text=showTextTab,Colors=showColorsTab,Fonts=showFontsTab,Presets=showPresetsTab,Export=showExportTab}
+    local tabBtns={}
+    local pad=Instance.new("UIPadding",sidebar) pad.PaddingTop=UDim.new(0,8)
+
+    for _,t in ipairs(editorTabs) do
+        local tb=Instance.new("TextButton",sidebar)
+        tb.Size=UDim2.new(0,72,0,58) tb.BackgroundColor3=Theme.BackgroundTertiary
+        tb.Text="" tb.AutoButtonColor=false
+        Instance.new("UICorner",tb).CornerRadius=UDim.new(0,8)
+        local ico=Instance.new("TextLabel",tb) ico.Size=UDim2.new(1,0,0.5,0)
+        ico.Position=UDim2.new(0,0,0,4) ico.BackgroundTransparency=1
+        ico.Text=t.Icon ico.TextSize=22
+        local lbl=Instance.new("TextLabel",tb) lbl.Size=UDim2.new(1,-4,0.4,0)
+        lbl.Position=UDim2.new(0,2,0.58,0) lbl.BackgroundTransparency=1
+        lbl.Text=t.Label lbl.TextColor3=Theme.TextDim lbl.Font=Enum.Font.GothamBold lbl.TextSize=9
+        tabBtns[t.Label]={btn=tb,lbl=lbl}
+        tb.MouseButton1Click:Connect(function()
+            for k,v in pairs(tabBtns) do
+                v.btn.BackgroundColor3=Theme.BackgroundTertiary
+                v.lbl.TextColor3=Theme.TextDim
+            end
+            tb.BackgroundColor3=Theme.Accent lbl.TextColor3=Color3.new(1,1,1)
+            if tabFuncs[t.Label] then tabFuncs[t.Label]() end
+        end)
+    end
+
+    showTextTab()
+    makeDraggable(editor)
+end
+
+-- ============================================================
+-- STATUS BAR TEXT
+-- ============================================================
+local function updateStatus()
+    if not UI.StatusText then return end
+    local bStr = State.BringActive and "ON" or "OFF"
+    local eStr = State.ESPEnabled  and "ON" or "OFF"
+    local flyStr = State.FlyActive and " | FLY: ON" or ""
+    UI.StatusText.Text = string.format(
+        "BRING: %s  |  ESP: %s%s  |  %s",
+        bStr, eStr, flyStr, RANK_INFO[LocalUser.Rank].Tag)
+end
+
+-- ============================================================
+-- APPLY THEME (full UI refresh)
+-- ============================================================
+local function applyTheme()
+    if not UI.MainFrame then return end
+    UI.MainFrame.BackgroundColor3    = Theme.Background
+    if UI.MainStroke then UI.MainStroke.Color = Theme.Accent end
+    if UI.Header     then UI.Header.BackgroundColor3 = Theme.BackgroundSecondary end
+    if UI.Title      then UI.Title.TextColor3 = Theme.Accent end
+    if UI.StatusBar  then UI.StatusBar.BackgroundColor3 = Theme.BackgroundSecondary end
+    if UI.MiniButton then
+        UI.MiniButton.BackgroundColor3 = Theme.Background
+        UI.MiniButton.TextColor3       = Theme.Accent
+        if UI.MiniStroke then UI.MiniStroke.Color = Theme.Accent end
+    end
+    if Theme.BgImage ~= "" and UI.BgImage then
+        UI.BgImage.Image = Theme.BgImage
+    end
+end
+
+-- ============================================================
+-- MAIN UI CREATION
+-- ============================================================
+local function createMainUI()
+    UI.ScreenGui = Instance.new("ScreenGui")
+    UI.ScreenGui.Name         = "SKA_ADMIN_FINAL"
+    UI.ScreenGui.ResetOnSpawn = false
+    UI.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    -- IgnoreGuiInset = true so the UI isn't pushed down by the top bar on mobile
+    UI.ScreenGui.IgnoreGuiInset = true
+    UI.ScreenGui.Parent       = PlayerGui
+    _G.SKA_FINAL_UI           = UI.ScreenGui
+
+    -- Detect mobile: use scale-based sizing so it fits any screen
+    local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+    -- Main frame — use scale on mobile so it fills proportionally
+    UI.MainFrame = Instance.new("Frame", UI.ScreenGui)
+    UI.MainFrame.Name            = "MainFrame"
+    if isMobile then
+        UI.MainFrame.Size     = UDim2.new(0.95, 0, 0.80, 0)
+        UI.MainFrame.Position = UDim2.new(0.025, 0, 0.10, 0)
+    else
+        UI.MainFrame.Size     = UDim2.new(0, 320, 0, 480)
+        UI.MainFrame.Position = UDim2.new(1, -340, 1, -510)
+    end
+    UI.MainFrame.BackgroundColor3= Theme.Background
+    UI.MainFrame.BorderSizePixel = 0
+    UI.MainFrame.ClipsDescendants= true
+    Instance.new("UICorner",UI.MainFrame).CornerRadius = UDim.new(0,14)
+
+    UI.MainStroke = Instance.new("UIStroke",UI.MainFrame)
+    UI.MainStroke.Color = Theme.Accent  UI.MainStroke.Thickness = 2
+
+    -- BG image layer (optional)
+    UI.BgImage = Instance.new("ImageLabel",UI.MainFrame)
+    UI.BgImage.Size = UDim2.new(1,0,1,0)
+    UI.BgImage.BackgroundTransparency = 1
+    UI.BgImage.ImageTransparency = 0.7
+    UI.BgImage.ScaleType = Enum.ScaleType.Crop
+    UI.BgImage.ZIndex = 0
+
+    -- Shadow
+    local shadow = Instance.new("ImageLabel",UI.MainFrame)
+    shadow.Size=UDim2.new(1,60,1,60) shadow.Position=UDim2.new(0,-30,0,-30)
+    shadow.BackgroundTransparency=1
+    shadow.Image="rbxassetid://1316045217"
+    shadow.ImageColor3=Color3.new(0,0,0) shadow.ImageTransparency=0.65
+    shadow.ScaleType=Enum.ScaleType.Slice shadow.SliceCenter=Rect.new(10,10,118,118)
+    shadow.ZIndex=-1
+
+    -- Header
+    UI.Header = Instance.new("Frame",UI.MainFrame)
+    UI.Header.Name = "Header"
+    UI.Header.Size = UDim2.new(1,0,0,48)
+    UI.Header.BackgroundColor3 = Theme.BackgroundSecondary
+    UI.Header.BorderSizePixel  = 0
+    Instance.new("UICorner",UI.Header).CornerRadius=UDim.new(0,14)
+    local hFix=Instance.new("Frame",UI.Header)
+    hFix.Size=UDim2.new(1,0,0,14) hFix.Position=UDim2.new(0,0,1,-14)
+    hFix.BackgroundColor3=Theme.BackgroundSecondary hFix.BorderSizePixel=0
+
+    UI.Title = Instance.new("TextLabel",UI.Header)
+    UI.Title.Size=UDim2.new(1,-115,0,28) UI.Title.Position=UDim2.new(0,14,0,6)
+    UI.Title.BackgroundTransparency=1 UI.Title.Text="SKA ADMIN  v9.1"
+    UI.Title.TextColor3=Theme.Accent UI.Title.Font=Enum.Font.Code
+    UI.Title.TextSize=15 UI.Title.TextXAlignment=Enum.TextXAlignment.Left
+
+    UI.RankLabel = Instance.new("TextLabel",UI.Header)
+    UI.RankLabel.Size=UDim2.new(1,-115,0,14) UI.RankLabel.Position=UDim2.new(0,14,0,30)
+    UI.RankLabel.BackgroundTransparency=1 UI.RankLabel.Text="[ free ]"
+    UI.RankLabel.TextColor3=Theme.TextDim UI.RankLabel.Font=Enum.Font.Code
+    UI.RankLabel.TextSize=10 UI.RankLabel.TextXAlignment=Enum.TextXAlignment.Left
+
+    -- Minimize button (always accessible, top-right)
+    UI.MinBtn = Instance.new("TextButton",UI.Header)
+    UI.MinBtn.Size=UDim2.new(0,30,0,30) UI.MinBtn.Position=UDim2.new(1,-72,0,9)
+    UI.MinBtn.BackgroundColor3=Theme.BackgroundTertiary
+    UI.MinBtn.Text="–" UI.MinBtn.TextColor3=Theme.Text
+    UI.MinBtn.Font=Enum.Font.GothamBold UI.MinBtn.TextSize=18
+    Instance.new("UICorner",UI.MinBtn).CornerRadius=UDim.new(0,7)
+
+    -- Close button
+    UI.CloseBtn = Instance.new("TextButton",UI.Header)
+    UI.CloseBtn.Size=UDim2.new(0,30,0,30) UI.CloseBtn.Position=UDim2.new(1,-36,0,9)
+    UI.CloseBtn.BackgroundColor3=Color3.fromRGB(210,50,65)
+    UI.CloseBtn.Text="×" UI.CloseBtn.TextColor3=Color3.new(1,1,1)
+    UI.CloseBtn.Font=Enum.Font.GothamBold UI.CloseBtn.TextSize=18
+    Instance.new("UICorner",UI.CloseBtn).CornerRadius=UDim.new(0,7)
+
+    -- Tab bar
+    local tabs = {"Combat","Visuals","Admin","Chat","Settings","Credits"}
+    UI.TabBar = Instance.new("Frame",UI.MainFrame)
+    UI.TabBar.Name="TabBar"
+    UI.TabBar.Size=UDim2.new(1,-18,0,30) UI.TabBar.Position=UDim2.new(0,9,0,54)
+    UI.TabBar.BackgroundColor3=Theme.BackgroundTertiary UI.TabBar.BorderSizePixel=0
+    Instance.new("UICorner",UI.TabBar).CornerRadius=UDim.new(0,8)
+
+    UI.TabButtons = {}
+    for i,tabName in ipairs(tabs) do
+        local tb=Instance.new("TextButton",UI.TabBar)
+        tb.Name=tabName.."Tab"
+        tb.Size=UDim2.new(1/#tabs,-4,1,-6) tb.Position=UDim2.new((i-1)/#tabs,2,0,3)
+        tb.BackgroundColor3=tabName=="Combat" and Theme.Accent or Theme.BackgroundSecondary
+        tb.Text=tabName:upper()
+        tb.TextColor3=tabName=="Combat" and Color3.new(1,1,1) or Theme.TextDim
+        tb.Font=Enum.Font.GothamBold tb.TextSize=10
+        Instance.new("UICorner",tb).CornerRadius=UDim.new(0,6)
+        UI.TabButtons[tabName]=tb
+    end
+
+    -- Content container
+    UI.ContentArea = Instance.new("Frame",UI.MainFrame)
+    UI.ContentArea.Name="ContentArea"
+    UI.ContentArea.Size=UDim2.new(1,-18,1,-130) UI.ContentArea.Position=UDim2.new(0,9,0,90)
+    UI.ContentArea.BackgroundTransparency=1
+
+    -- Panels (scrolling)
+    UI.Panels={}
+    for _,tabName in ipairs(tabs) do
+        local p=Instance.new("ScrollingFrame",UI.ContentArea)
+        p.Name=tabName.."Panel"
+        p.Size=UDim2.new(1,0,1,0)
+        p.BackgroundTransparency=1 p.BorderSizePixel=0
+        p.ScrollBarThickness=4 p.CanvasSize=UDim2.new(0,0,0,700)
+        p.Visible=tabName=="Combat"
+        UI.Panels[tabName]=p
+    end
+
+    -- Tab switching
+    for _,tabName in ipairs(tabs) do
+        UI.TabButtons[tabName].MouseButton1Click:Connect(function()
+            State.CurrentTab=tabName
+            for _,name in ipairs(tabs) do
+                UI.TabButtons[name].BackgroundColor3=name==tabName and Theme.Accent or Theme.BackgroundSecondary
+                UI.TabButtons[name].TextColor3=name==tabName and Color3.new(1,1,1) or Theme.TextDim
+                UI.Panels[name].Visible=name==tabName
+            end
+        end)
+    end
+
+    -- Status bar (above minimize, always visible)
+    UI.StatusBar=Instance.new("Frame",UI.MainFrame)
+    UI.StatusBar.Name="StatusBar"
+    UI.StatusBar.Size=UDim2.new(1,-18,0,22) UI.StatusBar.Position=UDim2.new(0,9,1,-32)
+    UI.StatusBar.BackgroundColor3=Theme.BackgroundSecondary UI.StatusBar.BorderSizePixel=0
+    Instance.new("UICorner",UI.StatusBar).CornerRadius=UDim.new(0,6)
+
+    UI.StatusText=Instance.new("TextLabel",UI.StatusBar)
+    UI.StatusText.Size=UDim2.new(1,-10,1,0) UI.StatusText.Position=UDim2.new(0,5,0,0)
+    UI.StatusText.BackgroundTransparency=1
+    UI.StatusText.Text="BRING: OFF  |  ESP: OFF"
+    UI.StatusText.TextColor3=Theme.TextDim UI.StatusText.Font=Enum.Font.Code
+    UI.StatusText.TextSize=9 UI.StatusText.TextXAlignment=Enum.TextXAlignment.Left
+
+    makeDraggable(UI.MainFrame)
+
+    -- Minimize: collapses to just header
+    UI.MinBtn.MouseButton1Click:Connect(function()
+        State.IsMinimized = not State.IsMinimized
+        local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+        if State.IsMinimized then
+            if isMobile then
+                UI.MainFrame.Size = UDim2.new(0.95, 0, 0, 50)
+            else
+                UI.MainFrame.Size = UDim2.new(0, 320, 0, 50)
+            end
+            UI.MinBtn.Text = "+"
+            UI.StatusBar.Visible  = false
+            UI.TabBar.Visible     = false
+            UI.ContentArea.Visible= false
+        else
+            if isMobile then
+                UI.MainFrame.Size = UDim2.new(0.95, 0, 0.80, 0)
+            else
+                UI.MainFrame.Size = UDim2.new(0, 320, 0, 480)
+            end
+            UI.MinBtn.Text = "–"
+            UI.StatusBar.Visible  = true
+            UI.TabBar.Visible     = true
+            UI.ContentArea.Visible= true
+        end
+    end)
+
+    -- Close → show circular mini button centered
+    UI.CloseBtn.MouseButton1Click:Connect(function()
+        UI.MainFrame.Visible  = false
+        UI.MiniButton.Visible = true
+        -- Center the mini button
+        UI.MiniButton.Position = UDim2.new(0.5,-28,0.5,-28)
+    end)
+
+    -- Rank label loop
+    task.spawn(function()
+        while task.wait(1) do
+            if UI.RankLabel and LocalUser.Rank ~= nil then
+                UI.RankLabel.Text       = "[ "..RANK_INFO[LocalUser.Rank].Name.." ]"
+                UI.RankLabel.TextColor3 = RANK_INFO[LocalUser.Rank].Color
+            end
+            updateStatus()
+        end
+    end)
+end
+
+-- ============================================================
+-- MINI BUTTON (circular, center-of-screen on close)
+-- ============================================================
+local function createMiniButton()
+    UI.MiniButton = Instance.new("TextButton",UI.ScreenGui)
+    UI.MiniButton.Name             = "SKA_Mini"
+    UI.MiniButton.Size             = UDim2.new(0,72,0,72)   -- larger
+    UI.MiniButton.Position         = UDim2.new(0.5,-36,0.5,-36)  -- initial center
+    UI.MiniButton.BackgroundColor3 = Theme.Background
+    UI.MiniButton.Text             = "SKA"
+    UI.MiniButton.TextColor3       = Theme.Accent
+    UI.MiniButton.Font             = Enum.Font.Code
+    UI.MiniButton.TextSize         = 17
+    UI.MiniButton.Visible          = false
+    Instance.new("UICorner",UI.MiniButton).CornerRadius = UDim.new(1,0)
+
+    UI.MiniStroke = Instance.new("UIStroke",UI.MiniButton)
+    UI.MiniStroke.Color = Theme.Accent  UI.MiniStroke.Thickness = 2
+
+    -- Optional custom image
+    UI.MiniImage = Instance.new("ImageLabel",UI.MiniButton)
+    UI.MiniImage.Size = UDim2.new(1,0,1,0)
+    UI.MiniImage.BackgroundTransparency = 1
+    UI.MiniImage.Image = Theme.MiniImage ~= "" and Theme.MiniImage or ""
+    UI.MiniImage.Visible = Theme.MiniImage ~= ""
+    Instance.new("UICorner",UI.MiniImage).CornerRadius = UDim.new(1,0)
+
+    -- Pulse glow
+    task.spawn(function()
+        while UI.MiniButton and UI.MiniButton.Parent do
+            tween(UI.MiniStroke,{Thickness=3.5},0.7)
+            task.wait(0.7)
+            tween(UI.MiniStroke,{Thickness=2},0.7)
+            task.wait(0.7)
+        end
+    end)
+
+    makeDraggable(UI.MiniButton)
+
+    UI.MiniButton.MouseButton1Click:Connect(function()
+        UI.MainFrame.Visible  = true
+        UI.MiniButton.Visible = false
+    end)
+end
+
+-- ============================================================
+-- COMBAT PANEL (original logic + rank gating)
+-- ============================================================
+local function buildCombatPanel()
+    local panel = UI.Panels.Combat
+
+    local function makeBtn(txt, y, accentColor, cb)
+        local b=Instance.new("TextButton",panel)
+        b.Size=UDim2.new(1,-10,0,40) b.Position=UDim2.new(0,5,0,y)
+        b.BackgroundColor3=Theme.BackgroundSecondary
+        b.Text=txt b.TextColor3=Theme.Text
+        b.Font=Enum.Font.GothamBold b.TextSize=12
+        b.AutoButtonColor=false
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,9)
+        local str=Instance.new("UIStroke",b)
+        str.Color=accentColor str.Thickness=1 str.Transparency=0.5
+        b.MouseEnter:Connect(function() tween(b,{BackgroundColor3=Theme.BackgroundTertiary},0.18) end)
+        b.MouseLeave:Connect(function() tween(b,{BackgroundColor3=Theme.BackgroundSecondary},0.18) end)
+        b.MouseButton1Click:Connect(cb)
+        return b
+    end
+
+    local function sectionLbl(txt,y)
+        local l=Instance.new("TextLabel",panel)
+        l.Size=UDim2.new(1,-10,0,18) l.Position=UDim2.new(0,5,0,y)
+        l.BackgroundTransparency=1 l.Text=txt
+        l.TextColor3=Theme.Accent l.Font=Enum.Font.GothamBold l.TextSize=11
+        l.TextXAlignment=Enum.TextXAlignment.Left
+    end
+
+    sectionLbl("COMBAT CONTROLS", 5)
+
+    -- Bring All
+    UI.BringBtn = makeBtn("ENABLE BRING ALL", 26, Color3.fromRGB(70,175,95), function()
+        if not hasPermission("bring_all") then
+            notify("Access Denied","Bring All requires Free rank or higher.",2) return
+        end
+        State.BringActive = not State.BringActive
+        if State.BringActive then
+            Connections.Bring = RunService.Heartbeat:Connect(bringAll)
+            _G.SKA_BRING_CONN = Connections.Bring
+            UI.BringBtn.Text = "DISABLE BRING ALL"
+            tween(UI.BringBtn,{BackgroundColor3=Color3.fromRGB(200,50,65)},0.2)
+        else
+            if Connections.Bring then Connections.Bring:Disconnect() Connections.Bring=nil end
+            UI.BringBtn.Text = "ENABLE BRING ALL"
+            tween(UI.BringBtn,{BackgroundColor3=Theme.BackgroundSecondary},0.2)
+        end
+        updateStatus()
+    end)
+
+    -- Bring Murderer
+    makeBtn("BRING MURDERER ONLY", 72, Theme.Murderer, function()
+        if not hasPermission("bring_murderer") then
+            notify("Access Denied","Bring Murderer requires Premium or higher.",2) return
+        end
+        bringMurdererOnly()
+    end)
+
+    panel.CanvasSize = UDim2.new(0,0,0,130)
+end
+
+-- ============================================================
+-- VISUALS PANEL
+-- ============================================================
+local function buildVisualsPanel()
+    local panel = UI.Panels.Visuals
+
+    local function makeToggle(txt,y,cb)
+        local f=Instance.new("Frame",panel)
+        f.Size=UDim2.new(1,-10,0,44) f.Position=UDim2.new(0,5,0,y)
+        f.BackgroundColor3=Theme.BackgroundSecondary f.BorderSizePixel=0
+        Instance.new("UICorner",f).CornerRadius=UDim.new(0,9)
+
+        local lbl=Instance.new("TextLabel",f)
+        lbl.Size=UDim2.new(0.72,0,1,0) lbl.Position=UDim2.new(0,14,0,0)
+        lbl.BackgroundTransparency=1 lbl.Text=txt
+        lbl.TextColor3=Theme.Text lbl.Font=Enum.Font.GothamBold lbl.TextSize=12
+        lbl.TextXAlignment=Enum.TextXAlignment.Left
+
+        local tgl=Instance.new("TextButton",f)
+        tgl.Size=UDim2.new(0,52,0,26) tgl.Position=UDim2.new(1,-62,0.5,-13)
+        tgl.BackgroundColor3=Theme.Dead tgl.Text="OFF"
+        tgl.TextColor3=Color3.new(1,1,1) tgl.Font=Enum.Font.GothamBold tgl.TextSize=11
+        Instance.new("UICorner",tgl).CornerRadius=UDim.new(0,13)
+
+        local on=false
+        tgl.MouseButton1Click:Connect(function()
+            on=not on
+            tgl.Text=on and "ON" or "OFF"
+            tgl.BackgroundColor3=on and Theme.Alive or Theme.Dead
+            cb(on)
+        end)
+        return tgl
+    end
+
+    local function sLbl(txt,y)
+        local l=Instance.new("TextLabel",panel)
+        l.Size=UDim2.new(1,-10,0,18) l.Position=UDim2.new(0,5,0,y)
+        l.BackgroundTransparency=1 l.Text=txt
+        l.TextColor3=Theme.Accent l.Font=Enum.Font.GothamBold l.TextSize=11
+        l.TextXAlignment=Enum.TextXAlignment.Left
+    end
+
+    sLbl("VISUAL MODS",5)
+
+    UI.ESPToggle = makeToggle("Role ESP (Murderer / Sheriff / Alive)",26,function(on)
+        State.ESPEnabled=on
+        if on then
+            task.spawn(function()
+                while State.ESPEnabled do updateESP() task.wait(2) end
+            end)
+        else
+            for _,hl in pairs(Highlights) do if hl then hl:Destroy() end end
+            Highlights={}
+        end
+        updateStatus()
+    end)
+
+    UI.FBToggle = makeToggle("Fullbright",76,function(on)
+        State.Fullbright=on
+        Lighting.Ambient   = on and Color3.new(1,1,1) or Color3.fromRGB(70,70,70)
+        Lighting.Brightness= on and 2 or 1
+    end)
+
+    UI.TagToggle = makeToggle("Show SKA Nametags",126,function(on)
+        for _,tag in pairs(Nametags) do
+            if tag and tag.Gui then tag.Gui.Enabled=on end
+        end
+    end)
+
+    panel.CanvasSize=UDim2.new(0,0,0,200)
+end
+
+-- ============================================================
+-- ADMIN PANEL
+-- ============================================================
+-- Forward declare
+local showTargetSelector
+local showGiveNametagUI
+
+-- Command definitions — MinRank checked LIVE on click, never at build time
+local ADMIN_CMDS = {
+    {Name="BRING",       Desc="Pull player to you",        Cmd="bring",       Icon="🔗", MinRank=1, Color=Color3.fromRGB(80,160,255)},
+    {Name="FREEZE",      Desc="Lock movement",             Cmd="freeze",      Icon="❄️", MinRank=1, Color=Color3.fromRGB(100,200,255)},
+    {Name="UNFREEZE",    Desc="Restore movement",          Cmd="unfreeze",    Icon="🔓", MinRank=1, Color=Color3.fromRGB(80,220,130)},
+    {Name="FLING",       Desc="Launch into air",           Cmd="fling",       Icon="🚀", MinRank=1, Color=Color3.fromRGB(255,150,50)},
+    {Name="BLIND",       Desc="Black screen 5s",           Cmd="blind",       Icon="👁",  MinRank=1, Color=Color3.fromRGB(150,50,255)},
+    {Name="KILL",        Desc="Instant death",             Cmd="kill",        Icon="💀", MinRank=2, Color=Color3.fromRGB(220,40,60)},
+    {Name="RESPAWN",     Desc="Force respawn",             Cmd="respawn",     Icon="♻",  MinRank=2, Color=Color3.fromRGB(100,200,100)},
+    {Name="CRASH",       Desc="Kick from game",            Cmd="crash",       Icon="💥", MinRank=2, Color=Color3.fromRGB(255,50,50)},
+    {Name="GIVE NAMETAG",Desc="Apply custom tag to player",Cmd="givenametag", Icon="🏷️", MinRank=3, Color=Color3.fromRGB(255,50,100)},
+}
+
+local function buildAdminPanel()
+    local panel = UI.Panels.Admin
+
+    -- Rank display card
+    local rankCard=Instance.new("Frame",panel)
+    rankCard.Size=UDim2.new(1,-10,0,64) rankCard.Position=UDim2.new(0,5,0,5)
+    rankCard.BackgroundColor3=Theme.BackgroundSecondary rankCard.BorderSizePixel=0
+    Instance.new("UICorner",rankCard).CornerRadius=UDim.new(0,10)
+    local rankStroke=Instance.new("UIStroke",rankCard)
+    rankStroke.Color=Theme.Accent rankStroke.Thickness=1.5
+
+    local rl=Instance.new("TextLabel",rankCard)
+    rl.Size=UDim2.new(1,-10,0,20) rl.Position=UDim2.new(0,10,0,6)
+    rl.BackgroundTransparency=1 rl.Text="YOUR RANK"
+    rl.TextColor3=Theme.TextDim rl.Font=Enum.Font.GothamBold rl.TextSize=10
+    rl.TextXAlignment=Enum.TextXAlignment.Left rl.TextScaled=false
+
+    local rankDisp=Instance.new("TextLabel",rankCard)
+    rankDisp.Size=UDim2.new(1,-10,0,30) rankDisp.Position=UDim2.new(0,10,0,28)
+    rankDisp.BackgroundTransparency=1 rankDisp.Text=RANK_INFO[LocalUser.Rank].Tag
+    rankDisp.TextColor3=RANK_INFO[LocalUser.Rank].Color rankDisp.Font=Enum.Font.Code
+    rankDisp.TextSize=16 rankDisp.TextXAlignment=Enum.TextXAlignment.Left rankDisp.TextScaled=false
+
+    task.spawn(function()
+        while task.wait(1) do
+            if rankDisp and rankDisp.Parent then
+                rankDisp.Text       = RANK_INFO[LocalUser.Rank].Tag
+                rankDisp.TextColor3 = RANK_INFO[LocalUser.Rank].Color
+                rankStroke.Color    = RANK_INFO[LocalUser.Rank].Color
+            end
+        end
+    end)
+
+    -- Command rows — built from ADMIN_CMDS, lock state evaluated LIVE on click
+    local lockRefreshFns = {}  -- called when rank updates after JSON reload
+
+    local function makeSectionLbl(txt, yPos)
+        local l=Instance.new("TextLabel",panel)
+        l.Size=UDim2.new(1,-10,0,16) l.Position=UDim2.new(0,5,0,yPos)
+        l.BackgroundTransparency=1 l.Text=txt
+        l.TextColor3=Theme.TextDim l.Font=Enum.Font.GothamBold
+        l.TextSize=10 l.TextScaled=false
+        l.TextXAlignment=Enum.TextXAlignment.Left
+    end
+
+    local y = 80
+    makeSectionLbl("▸  PREMIUM  (rank 1+)", 76)
+    y = y + 20
+
+    local prevMinRank = nil
+    for _,cmd in ipairs(ADMIN_CMDS) do
+        -- Section divider between tiers
+        if cmd.MinRank ~= prevMinRank and prevMinRank ~= nil then
+            y = y + 4
+            local tierLabel = cmd.MinRank == 2 and "▸  ADMIN  (rank 2+)"
+                           or cmd.MinRank == 3 and "▸  OWNER  (rank 3)"
+                           or nil
+            if tierLabel then makeSectionLbl(tierLabel, y) y = y + 20 end
+        end
+        prevMinRank = cmd.MinRank
+
+        local btn=Instance.new("TextButton",panel)
+        btn.Size=UDim2.new(1,-10,0,50) btn.Position=UDim2.new(0,5,0,y)
+        btn.BackgroundColor3=Theme.BackgroundSecondary btn.Text=""
+        btn.AutoButtonColor=false
+        Instance.new("UICorner",btn).CornerRadius=UDim.new(0,9)
+
+        local iconL=Instance.new("TextLabel",btn)
+        iconL.Size=UDim2.new(0,32,1,0) iconL.Position=UDim2.new(0,8,0,0)
+        iconL.BackgroundTransparency=1 iconL.Text=cmd.Icon iconL.TextSize=20 iconL.TextScaled=false
+
+        local nameL=Instance.new("TextLabel",btn)
+        nameL.Name="NameL"
+        nameL.Size=UDim2.new(0.5,0,0,20) nameL.Position=UDim2.new(0,46,0,7)
+        nameL.BackgroundTransparency=1 nameL.Text=cmd.Name
+        nameL.Font=Enum.Font.GothamBold nameL.TextSize=13 nameL.TextScaled=false
+        nameL.TextXAlignment=Enum.TextXAlignment.Left
+
+        local descL=Instance.new("TextLabel",btn)
+        descL.Size=UDim2.new(0.55,0,0,14) descL.Position=UDim2.new(0,46,0,28)
+        descL.BackgroundTransparency=1 descL.Text=cmd.Desc
+        descL.TextColor3=Theme.TextDim descL.Font=Enum.Font.Gotham descL.TextSize=10 descL.TextScaled=false
+        descL.TextXAlignment=Enum.TextXAlignment.Left
+
+        local statusL=Instance.new("TextLabel",btn)
+        statusL.Name="StatusL"
+        statusL.Size=UDim2.new(0.32,0,1,0) statusL.Position=UDim2.new(0.68,-5,0,0)
+        statusL.BackgroundTransparency=1
+        statusL.Font=Enum.Font.GothamBold statusL.TextSize=10 statusL.TextScaled=false
+        statusL.TextXAlignment=Enum.TextXAlignment.Right
+
+        -- Live-refresh lock appearance
+        local function refreshLock()
+            local locked = LocalUser.Rank < cmd.MinRank
+            nameL.TextColor3   = locked and Theme.Dead or cmd.Color
+            statusL.Text       = locked and "🔒 LOCKED" or "EXECUTE"
+            statusL.TextColor3 = locked and Theme.Dead or Theme.Accent
+        end
+        refreshLock()
+        table.insert(lockRefreshFns, refreshLock)
+
+        btn.MouseEnter:Connect(function() tween(btn,{BackgroundColor3=Theme.BackgroundTertiary},0.15) end)
+        btn.MouseLeave:Connect(function() tween(btn,{BackgroundColor3=Theme.BackgroundSecondary},0.15) end)
+
+        -- LIVE rank check on every click — not at build time
+        btn.MouseButton1Click:Connect(function()
+            if LocalUser.Rank < cmd.MinRank then
+                notify("Access Denied","Requires "..RANK_INFO[cmd.MinRank].Name.." rank.",3) return
+            end
+            if cmd.Cmd == "givenametag" then
+                showGiveNametagUI()
+            else
+                showTargetSelector(cmd.Cmd, cmd.Name)
+            end
+        end)
+        y = y + 56
+    end
+
+    -- Refresh lock visuals whenever JSON reloads and rank changes
+    task.spawn(function()
+        local lastRank = LocalUser.Rank
+        while task.wait(2) do
+            if LocalUser.Rank ~= lastRank then
+                lastRank = LocalUser.Rank
+                for _,fn in ipairs(lockRefreshFns) do pcall(fn) end
+            end
+        end
+    end)
+
+    -- Target selector frame (embedded at bottom)
+    UI.TargetFrame=Instance.new("Frame",panel)
+    UI.TargetFrame.Size=UDim2.new(1,-10,0,200)
+    UI.TargetFrame.Position=UDim2.new(0,5,0,y)
+    UI.TargetFrame.BackgroundColor3=Theme.BackgroundSecondary UI.TargetFrame.BorderSizePixel=0
+    UI.TargetFrame.Visible=false
+    Instance.new("UICorner",UI.TargetFrame).CornerRadius=UDim.new(0,10)
+    local tfStr=Instance.new("UIStroke",UI.TargetFrame) tfStr.Color=Theme.Accent tfStr.Thickness=1.5
+    y=y+206
+
+    local tTitle=Instance.new("TextLabel",UI.TargetFrame)
+    tTitle.Name="TargetTitle"
+    tTitle.Size=UDim2.new(1,-40,0,24) tTitle.Position=UDim2.new(0,10,0,5)
+    tTitle.BackgroundTransparency=1 tTitle.Text="SELECT TARGET"
+    tTitle.TextColor3=Theme.Accent tTitle.Font=Enum.Font.GothamBold
+    tTitle.TextSize=12 tTitle.TextScaled=false tTitle.TextXAlignment=Enum.TextXAlignment.Left
+
+    local tClose=Instance.new("TextButton",UI.TargetFrame)
+    tClose.Size=UDim2.new(0,24,0,24) tClose.Position=UDim2.new(1,-30,0,4)
+    tClose.BackgroundColor3=Theme.Dead tClose.Text="×"
+    tClose.TextColor3=Color3.new(1,1,1) tClose.Font=Enum.Font.GothamBold tClose.TextSize=14
+    Instance.new("UICorner",tClose).CornerRadius=UDim.new(0,5)
+    tClose.MouseButton1Click:Connect(function() UI.TargetFrame.Visible=false end)
+
+    UI.TargetScroll=Instance.new("ScrollingFrame",UI.TargetFrame)
+    UI.TargetScroll.Size=UDim2.new(1,-16,1,-34) UI.TargetScroll.Position=UDim2.new(0,8,0,30)
+    UI.TargetScroll.BackgroundTransparency=1 UI.TargetScroll.BorderSizePixel=0
+    UI.TargetScroll.ScrollBarThickness=3 UI.TargetScroll.CanvasSize=UDim2.new(0,0,0,0)
+    local tLayout=Instance.new("UIListLayout",UI.TargetScroll) tLayout.Padding=UDim.new(0,4)
+
+    panel.CanvasSize=UDim2.new(0,0,0,y+20)
+end
+
+function showTargetSelector(cmd, cmdName)
+    if not UI.TargetFrame then return end
+    local tTitle=UI.TargetFrame:FindFirstChild("TargetTitle")
+    if tTitle then tTitle.Text="SELECT TARGET  —  "..cmdName end
+    UI.TargetFrame.Visible=true
+
+    for _,c in ipairs(UI.TargetScroll:GetChildren()) do
+        if c:IsA("TextButton") or c:IsA("Frame") then c:Destroy() end
+    end
+
+    local count=0
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=localPlayer and canTarget(plr.Name) then
+            count=count+1
+            local b=Instance.new("TextButton",UI.TargetScroll)
+            b.Size=UDim2.new(1,0,0,34)
+            b.BackgroundColor3=Theme.BackgroundTertiary b.Text="" b.AutoButtonColor=false
+            Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
+
+            local nl=Instance.new("TextLabel",b)
+            nl.Size=UDim2.new(0.65,0,1,0) nl.Position=UDim2.new(0,10,0,0)
+            nl.BackgroundTransparency=1 nl.Text=plr.Name
+            nl.TextColor3=Theme.Text nl.Font=Enum.Font.GothamBold
+            nl.TextSize=12 nl.TextScaled=false nl.TextXAlignment=Enum.TextXAlignment.Left
+
+            local rk=getUserRank(plr.Name)
+            local rl=Instance.new("TextLabel",b)
+            rl.Size=UDim2.new(0.35,0,1,0) rl.Position=UDim2.new(0.65,-5,0,0)
+            rl.BackgroundTransparency=1 rl.Text="["..RANK_INFO[rk].Name.."]"
+            rl.TextColor3=RANK_INFO[rk].Color
+            rl.Font=Enum.Font.Code rl.TextSize=10 rl.TextScaled=false
+            rl.TextXAlignment=Enum.TextXAlignment.Right
+
+            b.MouseEnter:Connect(function() tween(b,{BackgroundColor3=Theme.Accent},0.15) end)
+            b.MouseLeave:Connect(function() tween(b,{BackgroundColor3=Theme.BackgroundTertiary},0.15) end)
+            b.MouseButton1Click:Connect(function()
+                executeCommand(plr, cmd)
+                UI.TargetFrame.Visible=false
+            end)
+        end
+    end
+    if count==0 then
+        local none=Instance.new("TextLabel",UI.TargetScroll)
+        none.Size=UDim2.new(1,0,0,34) none.BackgroundTransparency=1
+        none.Text="No valid targets" none.TextColor3=Theme.TextDim
+        none.Font=Enum.Font.Gotham none.TextSize=11 none.TextScaled=false
+    end
+    UI.TargetScroll.CanvasSize=UDim2.new(0,0,0,count*38+10)
+end
+
+-- ============================================================
+-- SETTINGS PANEL (themes + colors + images + nametag editor)
+-- ============================================================
+local function buildSettingsPanel()
+    local panel = UI.Panels.Settings
+
+    local function sLbl(txt,y)
+        local l=Instance.new("TextLabel",panel)
+        l.Size=UDim2.new(1,-10,0,18) l.Position=UDim2.new(0,5,0,y)
+        l.BackgroundTransparency=1 l.Text=txt
+        l.TextColor3=Theme.Accent l.Font=Enum.Font.GothamBold l.TextSize=11
+        l.TextXAlignment=Enum.TextXAlignment.Left
+    end
+
+    -- ---- THEME PRESETS ----
+    sLbl("THEME PRESETS", 5)
+    local y=26
+
+    for _,p in ipairs(THEME_PRESETS) do
+        local b=Instance.new("TextButton",panel)
+        b.Size=UDim2.new(1,-10,0,36) b.Position=UDim2.new(0,5,0,y)
+        b.BackgroundColor3=p.BG b.Text=""
+        b.AutoButtonColor=false
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,9)
+        local str=Instance.new("UIStroke",b) str.Color=p.Accent str.Thickness=2
+
+        -- Colour swatch on left
+        local swatch=Instance.new("Frame",b)
+        swatch.Size=UDim2.new(0,14,0,14) swatch.Position=UDim2.new(0,10,0.5,-7)
+        swatch.BackgroundColor3=p.Accent swatch.BorderSizePixel=0
+        Instance.new("UICorner",swatch).CornerRadius=UDim.new(1,0)
+
+        -- Name label — explicit size, no TextScaled, high-contrast colour
+        local nl=Instance.new("TextLabel",b)
+        nl.Size=UDim2.new(1,-30,1,0) nl.Position=UDim2.new(0,30,0,0)
+        nl.BackgroundTransparency=1
+        nl.Text=p.Name
+        nl.TextColor3=p.Accent        -- accent always contrasts against p.BG
+        nl.Font=Enum.Font.GothamBold
+        nl.TextSize=13
+        nl.TextScaled=false
+        nl.TextXAlignment=Enum.TextXAlignment.Left
+        nl.ClipsDescendants=false
+
+        b.MouseEnter:Connect(function() tween(b,{BackgroundColor3=p.BG:Lerp(Color3.new(1,1,1),0.08)},0.15) end)
+        b.MouseLeave:Connect(function() tween(b,{BackgroundColor3=p.BG},0.15) end)
+        b.MouseButton1Click:Connect(function()
+            Theme.Background = p.BG
+            Theme.Accent     = p.Accent
+            Theme.BackgroundSecondary  = p.BG:Lerp(Color3.fromRGB(128,128,128),0.08)
+            Theme.BackgroundTertiary   = p.BG:Lerp(Color3.fromRGB(128,128,128),0.15)
+            applyTheme()
+            notify("Theme","Applied "..p.Name,2)
+        end)
+        y=y+42
+    end
+
+    -- ---- CUSTOM COLORS ----
+    sLbl("CUSTOM UI COLORS", y+4)
+    y=y+24
+
+    local customColors={
+        {Name="Accent / Borders", Key="Accent"},
+        {Name="Background",       Key="Background"},
+        {Name="Murderer ESP",     Key="Murderer"},
+        {Name="Sheriff ESP",      Key="Sheriff"},
+        {Name="Alive ESP",        Key="Alive"},
+    }
+
+    for _,cc in ipairs(customColors) do
+        local holder=Instance.new("Frame",panel)
+        holder.Size=UDim2.new(1,-10,0,36) holder.Position=UDim2.new(0,5,0,y)
+        holder.BackgroundColor3=Theme.BackgroundSecondary holder.BorderSizePixel=0
+        Instance.new("UICorner",holder).CornerRadius=UDim.new(0,8)
+
+        local nl=Instance.new("TextLabel",holder)
+        nl.Size=UDim2.new(0.58,0,1,0) nl.Position=UDim2.new(0,12,0,0)
+        nl.BackgroundTransparency=1 nl.Text=cc.Name
+        nl.TextColor3=Theme.Text nl.Font=Enum.Font.Gotham nl.TextSize=12
+        nl.TextXAlignment=Enum.TextXAlignment.Left
+
+        local cb=Instance.new("TextButton",holder)
+        cb.Size=UDim2.new(0,80,0,26) cb.Position=UDim2.new(1,-92,0.5,-13)
+        cb.BackgroundColor3=Theme[cc.Key] cb.Text=rgbToHex(Theme[cc.Key])
+        cb.TextColor3=Color3.new(1,1,1) cb.Font=Enum.Font.Code cb.TextSize=10
+        Instance.new("UICorner",cb).CornerRadius=UDim.new(0,6)
+        cb.MouseButton1Click:Connect(function()
+            openColorPicker(Theme[cc.Key],function(c)
+                Theme[cc.Key]=c cb.BackgroundColor3=c cb.Text=rgbToHex(c)
+                applyTheme()
+            end)
+        end)
+        y=y+42
+    end
+
+    -- ---- NAMETAG EDITOR ----
+    sLbl("NAMETAG EDITOR", y+4)
+    y=y+24
+
+    local ntBtn=Instance.new("TextButton",panel)
+    ntBtn.Size=UDim2.new(1,-10,0,40) ntBtn.Position=UDim2.new(0,5,0,y)
+    ntBtn.BackgroundColor3=Theme.BackgroundSecondary ntBtn.Text=""
+    ntBtn.AutoButtonColor=false
+    Instance.new("UICorner",ntBtn).CornerRadius=UDim.new(0,9)
+    local ntStr=Instance.new("UIStroke",ntBtn) ntStr.Color=Theme.Accent ntStr.Thickness=1.5
+
+    local ntIcon=Instance.new("TextLabel",ntBtn)
+    ntIcon.Size=UDim2.new(0,32,1,0) ntIcon.Position=UDim2.new(0,8,0,0)
+    ntIcon.BackgroundTransparency=1 ntIcon.Text="🏷️" ntIcon.TextSize=20
+
+    local ntLbl=Instance.new("TextLabel",ntBtn)
+    ntLbl.Size=UDim2.new(1,-50,1,0) ntLbl.Position=UDim2.new(0,44,0,0)
+    ntLbl.BackgroundTransparency=1 ntLbl.Text="Open Nametag Editor"
+    ntLbl.TextColor3=Theme.Text ntLbl.Font=Enum.Font.GothamBold ntLbl.TextSize=12
+    ntLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+    ntBtn.MouseEnter:Connect(function() tween(ntBtn,{BackgroundColor3=Theme.BackgroundTertiary},0.15) end)
+    ntBtn.MouseLeave:Connect(function() tween(ntBtn,{BackgroundColor3=Theme.BackgroundSecondary},0.15) end)
+    ntBtn.MouseButton1Click:Connect(function()
+        if openNametagEditor then
+            openNametagEditor()
+        else
+            notify("Nametag","Editor not ready yet.",2)
+        end
+    end)
+    y=y+48
+
+    -- ---- BACKGROUND IMAGE ----
+    sLbl("BACKGROUND IMAGE", y+4)
+    y=y+24
+
+    local bgBox=Instance.new("TextBox",panel)
+    bgBox.Size=UDim2.new(1,-10,0,32) bgBox.Position=UDim2.new(0,5,0,y)
+    bgBox.BackgroundColor3=Theme.BackgroundSecondary
+    bgBox.PlaceholderText="Main window background image (rbxassetid://...)"
+    bgBox.Text="" bgBox.TextColor3=Theme.Text bgBox.Font=Enum.Font.Gotham
+    bgBox.TextSize=11 bgBox.ClearTextOnFocus=false
+    Instance.new("UICorner",bgBox).CornerRadius=UDim.new(0,7)
+    y=y+36
+
+    local miniBox=Instance.new("TextBox",panel)
+    miniBox.Size=UDim2.new(1,-10,0,32) miniBox.Position=UDim2.new(0,5,0,y)
+    miniBox.BackgroundColor3=Theme.BackgroundSecondary
+    miniBox.PlaceholderText="Mini button icon image (rbxassetid://...)"
+    miniBox.Text="" miniBox.TextColor3=Theme.Text miniBox.Font=Enum.Font.Gotham
+    miniBox.TextSize=11 miniBox.ClearTextOnFocus=false
+    Instance.new("UICorner",miniBox).CornerRadius=UDim.new(0,7)
+    y=y+36
+
+    local applyImg=Instance.new("TextButton",panel)
+    applyImg.Size=UDim2.new(1,-10,0,32) applyImg.Position=UDim2.new(0,5,0,y)
+    applyImg.BackgroundColor3=Color3.fromRGB(65,130,200) applyImg.Text="Apply Images"
+    applyImg.TextColor3=Color3.new(1,1,1) applyImg.Font=Enum.Font.GothamBold applyImg.TextSize=12
+    Instance.new("UICorner",applyImg).CornerRadius=UDim.new(0,8)
+    applyImg.MouseButton1Click:Connect(function()
+        if bgBox.Text~="" then
+            Theme.BgImage=bgBox.Text
+            if UI.BgImage then UI.BgImage.Image=bgBox.Text end
+        end
+        if miniBox.Text~="" then
+            Theme.MiniImage=miniBox.Text
+            if UI.MiniImage then UI.MiniImage.Image=miniBox.Text UI.MiniImage.Visible=true end
+            if UI.MiniButton then UI.MiniButton.Text="" end
+        end
+        notify("Images","Applied image settings",2)
+    end)
+    y=y+40
+
+    -- ---- PARDON LIST ----
+    sLbl("PARDONED PLAYERS (not brought)", y+4)
+    y=y+24
+
+    local pardStr=""
+    for name,_ in pairs(pardoned) do pardStr=pardStr..name.."\n" end
+    local pardLbl=Instance.new("TextLabel",panel)
+    pardLbl.Size=UDim2.new(1,-10,0,60) pardLbl.Position=UDim2.new(0,5,0,y)
+    pardLbl.BackgroundColor3=Theme.BackgroundSecondary pardLbl.BorderSizePixel=0
+    pardLbl.Text=pardStr~="" and pardStr or "(none)"
+    pardLbl.TextColor3=Theme.TextDim pardLbl.Font=Enum.Font.Code pardLbl.TextSize=10
+    pardLbl.TextXAlignment=Enum.TextXAlignment.Left pardLbl.TextWrapped=true
+    Instance.new("UICorner",pardLbl).CornerRadius=UDim.new(0,8)
+    y=y+66
+
+    -- ---- CREDITS ----
+    sLbl("CREDITS", y+4)
+    y=y+24
+
+    local credBox=Instance.new("Frame",panel)
+    credBox.Size=UDim2.new(1,-10,0,120) credBox.Position=UDim2.new(0,5,0,y)
+    credBox.BackgroundColor3=Theme.BackgroundSecondary credBox.BorderSizePixel=0
+    Instance.new("UICorner",credBox).CornerRadius=UDim.new(0,10)
+    local cStr=Instance.new("UIStroke",credBox) cStr.Color=Theme.Accent cStr.Thickness=1.5
+
+    local credTxt=Instance.new("TextLabel",credBox)
+    credTxt.Size=UDim2.new(1,-20,1,-10) credTxt.Position=UDim2.new(0,10,0,6)
+    credTxt.BackgroundTransparency=1
+    credTxt.Text=
+        "SKA ADMIN  v9.1\n"..
+        "─────────────────────────────\n"..
+        "Developer:  i8agy & Team\n"..
+        "Base:       Mois7 Admin + AK Admin\n"..
+        "Original:   Schweins Kill All\n"..
+        "JSON Host:  github.com/DukeBigglesworth/SKA_REPO\n"..
+        "© 2026 SKA Administration"
+    credTxt.TextColor3=Theme.TextDim credTxt.Font=Enum.Font.Code credTxt.TextSize=10
+    credTxt.TextXAlignment=Enum.TextXAlignment.Left credTxt.TextWrapped=true
+    y=y+126
+
+    panel.CanvasSize=UDim2.new(0,0,0,y+20)
+end
+
+-- ============================================================
+-- CREDITS PANEL
+-- ============================================================
+local function buildCreditsPanel()
+    local panel = UI.Panels.Credits
+
+    local function sLbl(txt,y,size,col)
+        local l=Instance.new("TextLabel",panel)
+        l.Size=UDim2.new(1,-10,0,size or 18) l.Position=UDim2.new(0,5,0,y)
+        l.BackgroundTransparency=1 l.Text=txt
+        l.TextColor3=col or Theme.Accent l.Font=Enum.Font.GothamBold l.TextSize=size or 11
+        l.TextXAlignment=Enum.TextXAlignment.Left
+        return l
+    end
+
+    -- Main title
+    local title=Instance.new("TextLabel",panel)
+    title.Size=UDim2.new(1,-10,0,48) title.Position=UDim2.new(0,5,0,10)
+    title.BackgroundTransparency=1 title.Text="SKA ADMIN  v9.1"
+    title.TextColor3=Theme.Accent title.Font=Enum.Font.Code
+    title.TextSize=22 title.TextScaled=false
+
+    -- Developer card
+    local y=70
+    local devCard=Instance.new("Frame",panel)
+    devCard.Size=UDim2.new(1,-10,0,90) devCard.Position=UDim2.new(0,5,0,y)
+    devCard.BackgroundColor3=Theme.BackgroundSecondary devCard.BorderSizePixel=0
+    Instance.new("UICorner",devCard).CornerRadius=UDim.new(0,10)
+    local dcStr=Instance.new("UIStroke",devCard)
+    dcStr.Color=Color3.fromRGB(255,50,100) dcStr.Thickness=2
+
+    local devIcon=Instance.new("TextLabel",devCard)
+    devIcon.Size=UDim2.new(0,50,0,50) devIcon.Position=UDim2.new(0,15,0,20)
+    devIcon.BackgroundColor3=Color3.fromRGB(255,50,100) devIcon.Text="👑"
+    devIcon.TextSize=28 devIcon.Font=Enum.Font.GothamBold
+    Instance.new("UICorner",devIcon).CornerRadius=UDim.new(0,8)
+
+    local devTitle=Instance.new("TextLabel",devCard)
+    devTitle.Size=UDim2.new(1,-80,0,24) devTitle.Position=UDim2.new(0,75,0,18)
+    devTitle.BackgroundTransparency=1 devTitle.Text="Made by schwein"
+    devTitle.TextColor3=Color3.fromRGB(255,50,100) devTitle.Font=Enum.Font.GothamBold
+    devTitle.TextSize=16 devTitle.TextScaled=false devTitle.TextXAlignment=Enum.TextXAlignment.Left
+
+    local devSub=Instance.new("TextLabel",devCard)
+    devSub.Size=UDim2.new(1,-80,0,20) devSub.Position=UDim2.new(0,75,0,44)
+    devSub.BackgroundTransparency=1 devSub.Text="Developer and owner"
+    devSub.TextColor3=Theme.TextDim devSub.Font=Enum.Font.Gotham
+    devSub.TextSize=12 devSub.TextScaled=false devSub.TextXAlignment=Enum.TextXAlignment.Left
+
+    -- Friend card
+    y=y+100
+    local friendCard=Instance.new("Frame",panel)
+    friendCard.Size=UDim2.new(1,-10,0,90) friendCard.Position=UDim2.new(0,5,0,y)
+    friendCard.BackgroundColor3=Theme.BackgroundSecondary friendCard.BorderSizePixel=0
+    Instance.new("UICorner",friendCard).CornerRadius=UDim.new(0,10)
+    local fcStr=Instance.new("UIStroke",friendCard)
+    fcStr.Color=Color3.fromRGB(235,180,50) fcStr.Thickness=2
+
+    local friendIcon=Instance.new("TextLabel",friendCard)
+    friendIcon.Size=UDim2.new(0,50,0,50) friendIcon.Position=UDim2.new(0,15,0,20)
+    friendIcon.BackgroundColor3=Color3.fromRGB(235,180,50) friendIcon.Text="💛"
+    friendIcon.TextSize=28 friendIcon.Font=Enum.Font.GothamBold
+    Instance.new("UICorner",friendIcon).CornerRadius=UDim.new(0,8)
+
+    local friendTitle=Instance.new("TextLabel",friendCard)
+    friendTitle.Size=UDim2.new(1,-80,0,24) friendTitle.Position=UDim2.new(0,75,0,18)
+    friendTitle.BackgroundTransparency=1 friendTitle.Text="Made for EEVEE"
+    friendTitle.TextColor3=Color3.fromRGB(235,180,50) friendTitle.Font=Enum.Font.GothamBold
+    friendTitle.TextSize=16 friendTitle.TextScaled=false friendTitle.TextXAlignment=Enum.TextXAlignment.Left
+
+    local friendSub=Instance.new("TextLabel",friendCard)
+    friendSub.Size=UDim2.new(1,-80,0,20) friendSub.Position=UDim2.new(0,75,0,44)
+    friendSub.BackgroundTransparency=1 friendSub.Text="Special thanks and dedication"
+    friendSub.TextColor3=Theme.TextDim friendSub.Font=Enum.Font.Gotham
+    friendSub.TextSize=12 friendSub.TextScaled=false friendSub.TextXAlignment=Enum.TextXAlignment.Left
+
+    -- Additional info
+    y=y+100
+    local infoBox=Instance.new("Frame",panel)
+    infoBox.Size=UDim2.new(1,-10,0,110) infoBox.Position=UDim2.new(0,5,0,y)
+    infoBox.BackgroundColor3=Theme.BackgroundSecondary infoBox.BorderSizePixel=0
+    Instance.new("UICorner",infoBox).CornerRadius=UDim.new(0,10)
+
+    local infoTxt=Instance.new("TextLabel",infoBox)
+    infoTxt.Size=UDim2.new(1,-20,1,-10) infoTxt.Position=UDim2.new(0,10,0,6)
+    infoTxt.BackgroundTransparency=1
+    infoTxt.Text=
+        "SKA ADMIN v9.1\n"..
+        "─────────────────────────────\n"..
+        "Base: Mois7 Admin + AK Admin\n"..
+        "Original: Schweins Kill All\n"..
+        "JSON Host: github.com/DukeBigglesworth\n"..
+        "© 2026 SKA Administration"
+    infoTxt.TextColor3=Theme.TextDim infoTxt.Font=Enum.Font.Code infoTxt.TextSize=10
+    infoTxt.TextScaled=false infoTxt.TextXAlignment=Enum.TextXAlignment.Left
+    infoTxt.TextYAlignment=Enum.TextYAlignment.Top infoTxt.TextWrapped=true
+
+    panel.CanvasSize=UDim2.new(0,0,0,y+120)
+end
+
+-- ============================================================
+-- TOP-BAR STATS (FPS / Ping / Players / Globe)
+-- ============================================================
+local function createTopBar()
+    UI.TopBar = Instance.new("Frame",UI.ScreenGui)
+    UI.TopBar.Name  = "SKA_TopBar"
+    UI.TopBar.Size  = UDim2.new(0,270,0,36)
+    UI.TopBar.Position = UDim2.new(0.5,-135,0,8)
+    UI.TopBar.BackgroundColor3 = Theme.Background
+    UI.TopBar.BorderSizePixel  = 0
+    Instance.new("UICorner",UI.TopBar).CornerRadius = UDim.new(0,8)
+    local tbStroke=Instance.new("UIStroke",UI.TopBar)
+    tbStroke.Color=Theme.Accent tbStroke.Thickness=1.5
+
+    local stats={
+        {Key="Players",Icon="👥",Val="?",W=64},
+        {Key="Ping",   Icon="📶",Val="?ms",W=64},
+        {Key="FPS",    Icon="⚡",Val="?",W=50},
+    }
+
+    local xp=8
+    for _,s in ipairs(stats) do
+        local b=Instance.new("TextButton",UI.TopBar)
+        b.Name=s.Key.."Stat"
+        b.Size=UDim2.new(0,s.W,0,26) b.Position=UDim2.new(0,xp,0.5,-13)
+        b.BackgroundColor3=Theme.BackgroundSecondary
+        b.Text=s.Icon.." "..s.Val b.TextColor3=Theme.Text
+        b.Font=Enum.Font.GothamBold b.TextSize=10
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,6)
+        UI[s.Key.."Stat"]=b
+        xp=xp+s.W+4
+    end
+
+    -- Globe button (server list)
+    local globe=Instance.new("TextButton",UI.TopBar)
+    globe.Size=UDim2.new(0,32,0,26) globe.Position=UDim2.new(1,-40,0.5,-13)
+    globe.BackgroundColor3=Theme.Accent globe.Text="🌐"
+    globe.TextColor3=Color3.new(1,1,1) globe.Font=Enum.Font.GothamBold globe.TextSize=14
+    Instance.new("UICorner",globe).CornerRadius=UDim.new(0,6)
+
+    -- Server dropdown
+    UI.ServerDrop=Instance.new("Frame",UI.ScreenGui)
+    UI.ServerDrop.Name="ServerDrop"
+    UI.ServerDrop.Size=UDim2.new(0,210,0,260) UI.ServerDrop.Position=UDim2.new(0.5,60,0,50)
+    UI.ServerDrop.BackgroundColor3=Theme.Background UI.ServerDrop.BorderSizePixel=0
+    UI.ServerDrop.Visible=false
+    Instance.new("UICorner",UI.ServerDrop).CornerRadius=UDim.new(0,10)
+    local sdStr=Instance.new("UIStroke",UI.ServerDrop) sdStr.Color=Theme.Accent sdStr.Thickness=2
+
+    local sdHead=Instance.new("Frame",UI.ServerDrop)
+    sdHead.Size=UDim2.new(1,0,0,32) sdHead.BackgroundColor3=Theme.BackgroundSecondary sdHead.BorderSizePixel=0
+    Instance.new("UICorner",sdHead).CornerRadius=UDim.new(0,10)
+    local sdFix=Instance.new("Frame",sdHead) sdFix.Size=UDim2.new(1,0,0,12) sdFix.Position=UDim2.new(0,0,1,-12) sdFix.BackgroundColor3=Theme.BackgroundSecondary sdFix.BorderSizePixel=0
+    local sdTitle=Instance.new("TextLabel",sdHead)
+    sdTitle.Size=UDim2.new(1,-36,1,0) sdTitle.Position=UDim2.new(0,10,0,0)
+    sdTitle.BackgroundTransparency=1 sdTitle.Text="SKA USERS ONLINE"
+    sdTitle.TextColor3=Theme.Accent sdTitle.Font=Enum.Font.GothamBold sdTitle.TextSize=12
+    sdTitle.TextXAlignment=Enum.TextXAlignment.Left
+    local sdClose=Instance.new("TextButton",sdHead)
+    sdClose.Size=UDim2.new(0,24,0,24) sdClose.Position=UDim2.new(1,-28,0,4)
+    sdClose.BackgroundColor3=Theme.Dead sdClose.Text="×"
+    sdClose.TextColor3=Color3.new(1,1,1) sdClose.Font=Enum.Font.GothamBold sdClose.TextSize=14
+    Instance.new("UICorner",sdClose).CornerRadius=UDim.new(0,5)
+    sdClose.MouseButton1Click:Connect(function()
+        UI.ServerDrop.Visible=false State.ServerDropOpen=false
+    end)
+
+    local sdList=Instance.new("ScrollingFrame",UI.ServerDrop)
+    sdList.Size=UDim2.new(1,-16,1,-42) sdList.Position=UDim2.new(0,8,0,36)
+    sdList.BackgroundTransparency=1 sdList.BorderSizePixel=0
+    sdList.ScrollBarThickness=3 sdList.CanvasSize=UDim2.new(0,0,0,0)
+    Instance.new("UIListLayout",sdList).Padding=UDim.new(0,4)
+    UI.DropList=sdList
+
+    globe.MouseButton1Click:Connect(function()
+        State.ServerDropOpen=not State.ServerDropOpen
+        UI.ServerDrop.Visible=State.ServerDropOpen
+    end)
+
+    -- Stats update loop — safe for mobile (no blocking Wait, pcall around ping)
+    local lastFPS = 0
+    RunService.RenderStepped:Connect(function(dt)
+        lastFPS = math.floor(1 / dt)
+    end)
+    task.spawn(function()
+        while task.wait(1) do
+            pcall(function()
+                if UI.FPSStat then
+                    UI.FPSStat.Text = "⚡ " .. lastFPS
+                end
+                if UI.PingStat then
+                    local ok, ping = pcall(function()
+                        return math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+                    end)
+                    UI.PingStat.Text = "📶 " .. (ok and (ping.."ms") or "?ms")
+                end
+                if UI.PlayersStat then
+                    UI.PlayersStat.Text = "👥 " .. #Players:GetPlayers() .. "/" .. Players.MaxPlayers
+                end
+            end)
+        end
+    end)
+
+    -- Server list update
+    task.spawn(function()
+        while task.wait(3) do
+            if UI.DropList then
+                for _,c in ipairs(UI.DropList:GetChildren()) do
+                    if c:IsA("Frame") or c:IsA("TextButton") then c:Destroy() end
+                end
+                local cnt=0
+                for uname,data in pairs(ActiveSKAUsers) do
+                    if uname~=localPlayer.Name then
+                        cnt=cnt+1
+                        local same=(data.jobId==game.JobId)
+                        local ur=data.rank or 0
+                        local sb=Instance.new("TextButton",UI.DropList)
+                        sb.Size=UDim2.new(1,0,0,42)
+                        sb.BackgroundColor3=same and Theme.BackgroundTertiary or Theme.BackgroundSecondary
+                        sb.Text="" sb.AutoButtonColor=false
+                        Instance.new("UICorner",sb).CornerRadius=UDim.new(0,6)
+                        local nl2=Instance.new("TextLabel",sb)
+                        nl2.Size=UDim2.new(1,-8,0,18) nl2.Position=UDim2.new(0,6,0,4)
+                        nl2.BackgroundTransparency=1 nl2.Text=uname..(same and " [HERE]" or "")
+                        nl2.TextColor3=same and Theme.Alive or Theme.Text
+                        nl2.Font=Enum.Font.GothamBold nl2.TextSize=11 nl2.TextXAlignment=Enum.TextXAlignment.Left
+                        local rl2=Instance.new("TextLabel",sb)
+                        rl2.Size=UDim2.new(1,-8,0,14) rl2.Position=UDim2.new(0,6,0,23)
+                        rl2.BackgroundTransparency=1 rl2.Text=RANK_INFO[ur].Tag
+                        rl2.TextColor3=RANK_INFO[ur].Color rl2.Font=Enum.Font.Code rl2.TextSize=9
+                        rl2.TextXAlignment=Enum.TextXAlignment.Left
+                        if not same and data.placeId and data.jobId then
+                            sb.MouseEnter:Connect(function() tween(sb,{BackgroundColor3=Theme.Accent},0.15) end)
+                            sb.MouseLeave:Connect(function() tween(sb,{BackgroundColor3=Theme.BackgroundSecondary},0.15) end)
+                            sb.MouseButton1Click:Connect(function()
+                                notify("Server","Joining "..uname.."...",2)
+                                pcall(function()
+                                    TeleportService:TeleportToPlaceInstance(data.placeId,data.jobId,localPlayer)
+                                end)
+                            end)
+                        end
+                    end
+                end
+                if cnt==0 then
+                    local nl3=Instance.new("TextLabel",UI.DropList)
+                    nl3.Size=UDim2.new(1,0,0,50) nl3.BackgroundTransparency=1
+                    nl3.Text="No other SKA users online" nl3.TextColor3=Theme.TextDim
+                    nl3.Font=Enum.Font.Gotham nl3.TextSize=11
+                end
+                UI.DropList.CanvasSize=UDim2.new(0,0,0,cnt*46+10)
+            end
+        end
+    end)
+end
+
+-- ============================================================
+-- BANNED SCREEN
+-- ============================================================
+local function showBanScreen()
+    local bg=Instance.new("ScreenGui",PlayerGui)
+    bg.Name="SKA_BanScreen" bg.ResetOnSpawn=false bg.DisplayOrder=9999
+
+    local f=Instance.new("Frame",bg)
+    f.Size=UDim2.new(1,0,1,0) f.BackgroundColor3=Color3.new(0,0,0)
+    f.BackgroundTransparency=0.15
+
+    local card=Instance.new("Frame",f)
+    card.Size=UDim2.new(0,340,0,160) card.Position=UDim2.new(0.5,-170,0.5,-80)
+    card.BackgroundColor3=Color3.fromRGB(18,5,8) card.BorderSizePixel=0
+    Instance.new("UICorner",card).CornerRadius=UDim.new(0,12)
+    local cs=Instance.new("UIStroke",card) cs.Color=Color3.fromRGB(220,40,60) cs.Thickness=2
+
+    local t1=Instance.new("TextLabel",card)
+    t1.Size=UDim2.new(1,-20,0,34) t1.Position=UDim2.new(0,10,0,10)
+    t1.BackgroundTransparency=1 t1.Text="⛔  BANNED FROM SKA ADMIN"
+    t1.TextColor3=Color3.fromRGB(220,40,60) t1.Font=Enum.Font.GothamBold t1.TextSize=16
+
+    local t2=Instance.new("TextLabel",card)
+    t2.Size=UDim2.new(1,-20,0,50) t2.Position=UDim2.new(0,10,0,50)
+    t2.BackgroundTransparency=1 t2.Text="Reason: "..(LocalUser.BanReason or "No reason given")
+    t2.TextColor3=Color3.fromRGB(200,180,180) t2.Font=Enum.Font.Gotham
+    t2.TextSize=12 t2.TextWrapped=true t2.TextXAlignment=Enum.TextXAlignment.Left
+
+    local t3=Instance.new("TextLabel",card)
+    t3.Size=UDim2.new(1,-20,0,30) t3.Position=UDim2.new(0,10,0,108)
+    t3.BackgroundTransparency=1 t3.Text="Contact an admin on Discord to appeal."
+    t3.TextColor3=Color3.fromRGB(150,150,150) t3.Font=Enum.Font.Code t3.TextSize=10
+end
+
+-- ============================================================
+-- INITIALIZATION
+-- ============================================================
+-- ============================================================
+-- GIVE NAMETAG UI  (Owner only — rank 3)
+-- ============================================================
+function showGiveNametagUI()
+    if LocalUser.Rank < 3 then
+        notify("Access Denied","Owner only.",2) return
+    end
+
+    -- Don't open twice
+    if UI.ScreenGui:FindFirstChild("SKA_GiveTag") then
+        UI.ScreenGui.SKA_GiveTag:Destroy()
+    end
+
+    local win=Instance.new("Frame",UI.ScreenGui)
+    win.Name="SKA_GiveTag"
+    win.Size=UDim2.new(0,340,0,380) win.Position=UDim2.new(0.5,-170,0.5,-190)
+    win.BackgroundColor3=Theme.Background win.BorderSizePixel=0 win.ZIndex=120
+    Instance.new("UICorner",win).CornerRadius=UDim.new(0,12)
+    local ws=Instance.new("UIStroke",win) ws.Color=Color3.fromRGB(255,50,100) ws.Thickness=2
+
+    -- Header
+    local hdr=Instance.new("Frame",win)
+    hdr.Size=UDim2.new(1,0,0,44) hdr.BackgroundColor3=Theme.BackgroundSecondary hdr.BorderSizePixel=0
+    Instance.new("UICorner",hdr).CornerRadius=UDim.new(0,12)
+    local hFix=Instance.new("Frame",hdr) hFix.Size=UDim2.new(1,0,0,12) hFix.Position=UDim2.new(0,0,1,-12) hFix.BackgroundColor3=Theme.BackgroundSecondary hFix.BorderSizePixel=0
+    local htl=Instance.new("TextLabel",hdr) htl.Size=UDim2.new(1,-50,1,0) htl.Position=UDim2.new(0,14,0,0)
+    htl.BackgroundTransparency=1 htl.Text="GIVE NAMETAG" htl.TextColor3=Color3.fromRGB(255,50,100)
+    htl.Font=Enum.Font.GothamBold htl.TextSize=16 htl.TextScaled=false htl.TextXAlignment=Enum.TextXAlignment.Left
+    local hcl=Instance.new("TextButton",hdr) hcl.Size=UDim2.new(0,28,0,28) hcl.Position=UDim2.new(1,-36,0,8)
+    hcl.BackgroundColor3=Color3.fromRGB(200,50,60) hcl.Text="×" hcl.TextColor3=Color3.new(1,1,1)
+    hcl.Font=Enum.Font.GothamBold hcl.TextSize=16
+    Instance.new("UICorner",hcl).CornerRadius=UDim.new(0,6)
+    hcl.MouseButton1Click:Connect(function() win:Destroy() end)
+
+    local function mkLabel(txt,y)
+        local l=Instance.new("TextLabel",win) l.Size=UDim2.new(1,-20,0,16) l.Position=UDim2.new(0,10,0,y)
+        l.BackgroundTransparency=1 l.Text=txt l.TextColor3=Theme.TextDim
+        l.Font=Enum.Font.GothamBold l.TextSize=10 l.TextScaled=false l.TextXAlignment=Enum.TextXAlignment.Left
+    end
+    local function mkBox(placeholder,y,h)
+        local b=Instance.new("TextBox",win) b.Size=UDim2.new(1,-20,0,h or 32) b.Position=UDim2.new(0,10,0,y)
+        b.BackgroundColor3=Theme.BackgroundSecondary b.PlaceholderText=placeholder
+        b.Text="" b.TextColor3=Theme.Text b.Font=Enum.Font.Gotham b.TextSize=12
+        b.TextScaled=false b.ClearTextOnFocus=false b.TextXAlignment=Enum.TextXAlignment.Left
+        Instance.new("UICorner",b).CornerRadius=UDim.new(0,7)
+        local bp=Instance.new("UIPadding",b) bp.PaddingLeft=UDim.new(0,8)
+        return b
+    end
+
+    mkLabel("TARGET PLAYER",50)
+    local targetBox=mkBox("Username (exact)",68)
+
+    mkLabel("CUSTOM TAG TEXT",108)
+    local tagBox=mkBox("e.g. SKA PREMIUM",126)
+
+    mkLabel("TAG COLOR  (R, G, B)",166)
+    local tagColorBox=mkBox("e.g. 235, 180, 50",184)
+
+    mkLabel("GLOW COLOR  (R, G, B)",224)
+    local glowBox=mkBox("e.g. 255, 200, 80",242)
+
+    mkLabel("FONT",282)
+    local fontBox=mkBox("e.g. GothamBold",300)
+
+    -- Apply button
+    local applyBtn=Instance.new("TextButton",win)
+    applyBtn.Size=UDim2.new(1,-20,0,36) applyBtn.Position=UDim2.new(0,10,0,342)
+    applyBtn.BackgroundColor3=Color3.fromRGB(255,50,100)
+    applyBtn.Text="APPLY TO PLAYER" applyBtn.TextColor3=Color3.new(1,1,1)
+    applyBtn.Font=Enum.Font.GothamBold applyBtn.TextSize=13 applyBtn.TextScaled=false
+    Instance.new("UICorner",applyBtn).CornerRadius=UDim.new(0,9)
+
+    applyBtn.MouseButton1Click:Connect(function()
+        local tName = targetBox.Text
+        local tPlr  = Players:FindFirstChild(tName)
+        if not tPlr then
+            notify("Give Tag","Player '"..tName.."' not found in this server.",3) return
+        end
+
+        local tagTxt   = tagBox.Text ~= "" and tagBox.Text or nil
+        local tagCol   = tagColorBox.Text ~= "" and strToColor(tagColorBox.Text) or nil
+        local glowCol  = glowBox.Text ~= "" and strToColor(glowBox.Text) or nil
+        local fontName = fontBox.Text ~= "" and fontBox.Text or nil
+
+        -- Patch local ServerData so nametag updates this session
+        -- (permanent change still requires updating the GitHub JSON)
+        if not ServerData.Users[tName] then ServerData.Users[tName]={} end
+        -- If they had no rank yet, give them premium so they don't stay "free"
+        if not ServerData.Users[tName].rank or ServerData.Users[tName].rank < 1 then
+            ServerData.Users[tName].rank = 1
+        end
+        if tagTxt   then ServerData.Users[tName].tag             = tagTxt end
+        if tagCol   then ServerData.Users[tName].tagColor        = colorToStr(tagCol) end
+        if glowCol  then ServerData.Users[tName].glowColor       = colorToStr(glowCol) end
+        if fontName then ServerData.Users[tName].font            = fontName end
+
+        -- Force nametag rebuild for that player (so the new data is picked up immediately)
+        if Nametags[tPlr] then
+            pcall(function() Nametags[tPlr].Gui:Destroy()      end)
+            pcall(function() Nametags[tPlr].PortalGui:Destroy() end)
+            Nametags[tPlr] = nil
+        end
+
+        notify("Give Tag","Applied custom tag to "..tName.." (local this session — add to GitHub JSON to make permanent)",4)
+        win:Destroy()
+    end)
+
+    makeDraggable(win)
+end
+
+-- ============================================================
+-- LEFT-ALT COMMAND CONSOLE
+-- ============================================================
+-- Press Left Alt to toggle. Type ;command [args] and press Enter.
+-- Supported commands:
+--   ;fly / ;unfly
+--   ;antivc on|off
+--   ;bring [username]  — bring all if no name
+--   ;esp on|off
+--   ;fullbright on|off
+--   ;kill [username]
+--   ;fling [username]
+--   ;freeze [username]
+--   ;tp [username]
+--   ;help
+
+local flyConnection = nil
+local flyBodyVelocity = nil
+local flyBodyGyro = nil
+
+local function enableFly()
+    local char = localPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not hrp or not hum then return end
+
+    hum.PlatformStand = true
+
+    flyBodyGyro = Instance.new("BodyGyro", hrp)
+    flyBodyGyro.MaxTorque = Vector3.new(9e9,9e9,9e9)
+    flyBodyGyro.P = 9e4
+    flyBodyGyro.CFrame = hrp.CFrame
+
+    flyBodyVelocity = Instance.new("BodyVelocity", hrp)
+    flyBodyVelocity.Velocity = Vector3.zero
+    flyBodyVelocity.MaxForce = Vector3.new(9e9,9e9,9e9)
+
+    local SPEED = 60
+    flyConnection = RunService.RenderStepped:Connect(function()
+        local cam = workspace.CurrentCamera
+        if not cam or not hrp or not hrp.Parent then return end
+        local dir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then dir = dir - Vector3.new(0,1,0) end
+        flyBodyVelocity.Velocity = dir.Magnitude > 0 and dir.Unit * SPEED or Vector3.zero
+        flyBodyGyro.CFrame = cam.CFrame
+    end)
+    notify("Fly","Fly enabled — WASD+Space/Shift to move",2)
+end
+
+local function disableFly()
+    if flyConnection then flyConnection:Disconnect() flyConnection=nil end
+    if flyBodyVelocity and flyBodyVelocity.Parent then flyBodyVelocity:Destroy() flyBodyVelocity=nil end
+    if flyBodyGyro and flyBodyGyro.Parent then flyBodyGyro:Destroy() flyBodyGyro=nil end
+    local char = localPlayer.Character
+    if char then
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then hum.PlatformStand = false end
+    end
+    notify("Fly","Fly disabled",2)
+end
+
+local function createAltConsole()
+    local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+    local consoleGui = Instance.new("ScreenGui", PlayerGui)
+    consoleGui.Name = "SKA_Console"
+    consoleGui.ResetOnSpawn = false
+    consoleGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    consoleGui.DisplayOrder = 999
+
+    local bg = Instance.new("Frame", consoleGui)
+    bg.Name = "ConsoleBG"
+    -- Scale on mobile so it fits the screen width
+    if isMobile then
+        bg.Size     = UDim2.new(0.95, 0, 0, 50)
+        bg.Position = UDim2.new(0.025, 0, 0, 8)
+    else
+        bg.Size     = UDim2.new(0, 460, 0, 42)
+        bg.Position = UDim2.new(0.5, -230, 0, 12)
+    end
+    bg.BackgroundColor3 = Theme.Background
+    bg.BorderSizePixel = 0
+    bg.Visible = false
+    Instance.new("UICorner",bg).CornerRadius = UDim.new(0,10)
+    local bgStr=Instance.new("UIStroke",bg) bgStr.Color=Theme.Accent bgStr.Thickness=2
+
+    local prefix = Instance.new("TextLabel",bg)
+    prefix.Size = UDim2.new(0,28,1,0) prefix.Position = UDim2.new(0,8,0,0)
+    prefix.BackgroundTransparency = 1 prefix.Text = ";"
+    prefix.TextColor3 = Theme.Accent prefix.Font = Enum.Font.Code
+    prefix.TextSize = 18 prefix.TextScaled = false
+
+    local inputBox = Instance.new("TextBox",bg)
+    inputBox.Name = "InputBox"
+    inputBox.Size = UDim2.new(1,-42,1,-8) inputBox.Position = UDim2.new(0,32,0,4)
+    inputBox.BackgroundTransparency = 1
+    inputBox.PlaceholderText = "command  e.g. fly  |  help  |  bring PlayerName"
+    inputBox.Text = "" inputBox.TextColor3 = Theme.Text
+    inputBox.Font = Enum.Font.Code inputBox.TextSize = 14 inputBox.TextScaled = false
+    inputBox.ClearTextOnFocus = false inputBox.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Output line beneath
+    local outBg = Instance.new("Frame", consoleGui)
+    outBg.Name = "OutBG"
+    if isMobile then
+        outBg.Size     = UDim2.new(0.95, 0, 0, 30)
+        outBg.Position = UDim2.new(0.025, 0, 0, 62)
+    else
+        outBg.Size     = UDim2.new(0, 460, 0, 26)
+        outBg.Position = UDim2.new(0.5, -230, 0, 58)
+    end
+    outBg.BackgroundColor3 = Theme.BackgroundSecondary outBg.BorderSizePixel=0
+    outBg.Visible = false
+    Instance.new("UICorner",outBg).CornerRadius = UDim.new(0,8)
+
+    local outLabel = Instance.new("TextLabel",outBg)
+    outLabel.Size = UDim2.new(1,-16,1,0) outLabel.Position = UDim2.new(0,8,0,0)
+    outLabel.BackgroundTransparency = 1 outLabel.Text = ""
+    outLabel.TextColor3 = Theme.TextDim outLabel.Font = Enum.Font.Code
+    outLabel.TextSize = 11 outLabel.TextScaled = false
+    outLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Mobile toggle button (bottom-left corner, only shown on touch devices)
+    if isMobile then
+        local mobileToggle = Instance.new("TextButton", consoleGui)
+        mobileToggle.Size = UDim2.new(0, 52, 0, 52)
+        mobileToggle.Position = UDim2.new(0, 8, 1, -68)
+        mobileToggle.BackgroundColor3 = Theme.Accent
+        mobileToggle.Text = ";"
+        mobileToggle.TextColor3 = Color3.new(1,1,1)
+        mobileToggle.Font = Enum.Font.GothamBold
+        mobileToggle.TextSize = 22
+        Instance.new("UICorner", mobileToggle).CornerRadius = UDim.new(0,12)
+        mobileToggle.MouseButton1Click:Connect(function()
+            local nowVisible = not bg.Visible
+            bg.Visible = nowVisible
+            if nowVisible then
+                inputBox.Text = ""
+                inputBox:CaptureFocus()
+            else
+                outBg.Visible = false
+            end
+        end)
+    end
+
+    local function consoleOut(msg, col)
+        outBg.Visible = true
+        outLabel.Text = msg
+        outLabel.TextColor3 = col or Theme.Text
+        task.delay(4, function() if outBg and outBg.Parent then outBg.Visible=false end end)
+    end
+
+    local flyActive = false
+
+    local function runCommand(raw)
+        raw = raw:match("^%s*;?(.-)%s*$")  -- strip leading ; and whitespace
+        if raw == "" then return end
+        local parts = {}
+        for w in raw:gmatch("%S+") do table.insert(parts,w) end
+        local cmd = parts[1] and parts[1]:lower() or ""
+        local arg = parts[2] or ""
+
+        if cmd == "fly" then
+            if not flyActive then
+                flyActive=true State.FlyActive=true
+                enableFly() consoleOut("Fly ON",Theme.Alive) updateStatus()
+            end
+
+        elseif cmd == "unfly" or cmd == "nofly" then
+            if flyActive then
+                flyActive=false State.FlyActive=false
+                disableFly() consoleOut("Fly OFF",Theme.Murderer) updateStatus()
+            end
+
+        elseif cmd == "esp" then
+            local on = arg:lower()~="off"
+            State.ESPEnabled = on
+            if on then
+                task.spawn(function()
+                    while State.ESPEnabled do updateESP() task.wait(2) end
+                end)
+            else
+                for _,hl in pairs(Highlights) do if hl then hl:Destroy() end end
+                Highlights = {}
+            end
+            updateStatus()
+            consoleOut("ESP "..(on and "ON" or "OFF"))
+
+        elseif cmd == "fullbright" or cmd == "fb" then
+            local on = arg:lower()~="off"
+            State.Fullbright = on
+            Lighting.Ambient    = on and Color3.new(1,1,1) or Color3.fromRGB(70,70,70)
+            Lighting.Brightness = on and 2 or 1
+            consoleOut("Fullbright "..(on and "ON" or "OFF"))
+
+        elseif cmd == "bring" then
+            if arg == "" then
+                if LocalUser.Rank < 1 then consoleOut("No permission",Theme.Murderer) return end
+                State.BringActive = true
+                if Connections.Bring then Connections.Bring:Disconnect() end
+                Connections.Bring = RunService.Heartbeat:Connect(bringAll)
+                _G.SKA_BRING_CONN = Connections.Bring
+                consoleOut("Bring All ON",Theme.Alive)
+            else
+                local tPlr = Players:FindFirstChild(arg)
+                if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+                if LocalUser.Rank < 1 then consoleOut("No permission",Theme.Murderer) return end
+                executeCommand(tPlr,"bring")
+                consoleOut("Brought "..arg)
+            end
+            updateStatus()
+
+        elseif cmd == "unbring" or cmd == "stopbring" then
+            State.BringActive = false
+            if Connections.Bring then Connections.Bring:Disconnect() Connections.Bring=nil end
+            updateStatus()
+            consoleOut("Bring stopped")
+
+        elseif cmd == "kill" then
+            if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"kill")
+            consoleOut("Killed "..arg, Theme.Murderer)
+
+        elseif cmd == "crash" then
+            if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"crash")
+            consoleOut("Crashed "..arg, Theme.Murderer)
+
+        elseif cmd == "respawn" then
+            if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"respawn")
+            consoleOut("Respawned "..arg)
+
+        elseif cmd == "fling" then
+            if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"fling")
+            consoleOut("Flung "..arg)
+
+        elseif cmd == "blind" then
+            if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"blind")
+            consoleOut("Blinded "..arg)
+
+        elseif cmd == "freeze" then
+            if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"freeze")
+            consoleOut("Froze "..arg)
+
+        elseif cmd == "unfreeze" then
+            if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            executeCommand(tPlr,"unfreeze")
+            consoleOut("Unfroze "..arg)
+
+        elseif cmd == "tp" or cmd == "teleport" then
+            local tPlr = Players:FindFirstChild(arg)
+            if not tPlr or not tPlr.Character then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local myHRP = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local tgHRP = tPlr.Character:FindFirstChild("HumanoidRootPart")
+            if myHRP and tgHRP then
+                myHRP.CFrame = tgHRP.CFrame * CFrame.new(0,0,4)
+                consoleOut("Teleported to "..arg)
+            end
+
+        elseif cmd == "nametag" or cmd == "nt" then
+            if openNametagEditor then openNametagEditor()
+            else consoleOut("Editor not ready",Theme.Murderer) end
+
+        elseif cmd == "help" then
+            consoleOut("fly unfly bring unbring esp fb kill crash respawn fling blind freeze unfreeze tp nametag help")
+
+        else
+            consoleOut("Unknown: "..cmd.." (;help for list)", Theme.Murderer)
+        end
+    end
+
+    inputBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            runCommand(inputBox.Text)
+            inputBox.Text = ""
+        end
+    end)
+
+    -- Toggle on Left Alt (desktop)
+    UserInputService.InputBegan:Connect(function(inp, gameProcessed)
+        if gameProcessed then return end
+        if inp.KeyCode == Enum.KeyCode.LeftAlt then
+            local nowVisible = not bg.Visible
+            bg.Visible = nowVisible
+            if nowVisible then
+                inputBox.Text = ""
+                inputBox:CaptureFocus()
+            else
+                outBg.Visible = false
+            end
+        end
+        -- Close console on Escape
+        if inp.KeyCode == Enum.KeyCode.Escape and bg.Visible then
+            bg.Visible = false
+            outBg.Visible = false
+        end
+    end)
+
+    -- ── Persistent bottom command bar (visible on ALL devices) ──
+    local bottomBar = Instance.new("Frame", consoleGui)
+    bottomBar.Name = "BottomCmdBar"
+    bottomBar.Size = UDim2.new(1, -20, 0, 38)
+    bottomBar.Position = UDim2.new(0, 10, 1, -48)
+    bottomBar.BackgroundColor3 = Theme.BackgroundSecondary
+    bottomBar.BorderSizePixel = 0
+    Instance.new("UICorner", bottomBar).CornerRadius = UDim.new(0, 10)
+    local bbStr = Instance.new("UIStroke", bottomBar)
+    bbStr.Color = Theme.Accent  bbStr.Thickness = 1.5
+
+    local bbPrefix = Instance.new("TextLabel", bottomBar)
+    bbPrefix.Size = UDim2.new(0, 26, 1, 0)  bbPrefix.Position = UDim2.new(0, 8, 0, 0)
+    bbPrefix.BackgroundTransparency = 1  bbPrefix.Text = ";"
+    bbPrefix.TextColor3 = Theme.Accent  bbPrefix.Font = Enum.Font.Code
+    bbPrefix.TextSize = 16  bbPrefix.TextScaled = false
+
+    local bbBox = Instance.new("TextBox", bottomBar)
+    bbBox.Name = "BottomInputBox"
+    bbBox.Size = UDim2.new(1, -100, 1, -10)  bbBox.Position = UDim2.new(0, 30, 0, 5)
+    bbBox.BackgroundTransparency = 1
+    bbBox.PlaceholderText = "Command (e.g. fly, bring Player, help)"
+    bbBox.Text = ""  bbBox.TextColor3 = Theme.Text
+    bbBox.Font = Enum.Font.Code  bbBox.TextSize = 12  bbBox.TextScaled = false
+    bbBox.ClearTextOnFocus = false  bbBox.TextXAlignment = Enum.TextXAlignment.Left
+
+    local bbSend = Instance.new("TextButton", bottomBar)
+    bbSend.Size = UDim2.new(0, 54, 1, -10)  bbSend.Position = UDim2.new(1, -60, 0, 5)
+    bbSend.BackgroundColor3 = Theme.Accent  bbSend.Text = "Run"
+    bbSend.TextColor3 = Color3.new(1,1,1)  bbSend.Font = Enum.Font.GothamBold
+    bbSend.TextSize = 12  bbSend.AutoButtonColor = false
+    Instance.new("UICorner", bbSend).CornerRadius = UDim.new(0, 6)
+
+    local function runBottomCmd()
+        local txt = bbBox.Text:match("^%s*(.-)%s*$")
+        if txt ~= "" then
+            runCommand(txt)
+            bbBox.Text = ""
+        end
+    end
+    bbSend.MouseButton1Click:Connect(runBottomCmd)
+    bbBox.FocusLost:Connect(function(enter)
+        if enter then runBottomCmd() end
+    end)
+
+    return consoleGui
+end
+
+-- ============================================================
+-- CHAT / MESSAGING PANEL
+-- ============================================================
+local RANK_LABEL = {
+    [0] = "SKA Free",
+    [1] = "SKA Premium",
+    [2] = "SKA Admin",
+    [3] = "SKA Owner",
+}
+local RANK_CHAT_COLOR = {
+    [0] = Color3.fromRGB(160,160,160),
+    [1] = Color3.fromRGB(235,180,50),
+    [2] = Color3.fromRGB(235,50,50),
+    [3] = Color3.fromRGB(255,50,100),
+}
+
+local function buildChatPanel()
+    local panel = UI.Panels.Chat
+    if not panel then return end
+
+    -- State
+    local currentMode   = "global"   -- "global" | "game" | "server"
+    local lastTimestamp = 0           -- only fetch messages newer than this
+    local msgRows       = {}          -- list of rendered row frames
+
+    -- ── Sub-tab bar ──────────────────────────────────────────
+    local modeBar = Instance.new("Frame", panel)
+    modeBar.Size = UDim2.new(1,-10,0,30)  modeBar.Position = UDim2.new(0,5,0,5)
+    modeBar.BackgroundColor3 = Theme.BackgroundTertiary  modeBar.BorderSizePixel = 0
+    Instance.new("UICorner", modeBar).CornerRadius = UDim.new(0,8)
+
+    local modeButtons = {}
+    local modeDefs = {
+        { Key="global", Label="🌐 Global",   Tip="All SKA users everywhere" },
+        { Key="game",   Label="🎮 Game",     Tip="Same game (any server)" },
+        { Key="server", Label="🖥 Server",   Tip="Same server only" },
+    }
+    for i, md in ipairs(modeDefs) do
+        local b = Instance.new("TextButton", modeBar)
+        b.Size = UDim2.new(1/3,-4,1,-6)  b.Position = UDim2.new((i-1)/3,2,0,3)
+        b.BackgroundColor3 = (md.Key=="global") and Theme.Accent or Theme.BackgroundSecondary
+        b.Text = md.Label
+        b.TextColor3 = (md.Key=="global") and Color3.new(1,1,1) or Theme.TextDim
+        b.Font = Enum.Font.GothamBold  b.TextSize = 9
+        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+        modeButtons[md.Key] = b
+    end
+
+    -- ── Input area (fixed at bottom, ALWAYS VISIBLE) ──────────
+    local inputBG = Instance.new("Frame", panel)
+    inputBG.Name = "ChatInputBG"
+    inputBG.Size = UDim2.new(1,-10,0,60)  inputBG.Position = UDim2.new(0,5,1,-65)
+    inputBG.BackgroundColor3 = Theme.BackgroundSecondary  inputBG.BorderSizePixel = 0
+    Instance.new("UICorner", inputBG).CornerRadius = UDim.new(0,8)
+    local inputStroke = Instance.new("UIStroke", inputBG)
+    inputStroke.Color = Theme.Accent  inputStroke.Thickness = 1
+
+    local inputBox = Instance.new("TextBox", inputBG)
+    inputBox.Size = UDim2.new(1,-70,1,-16)  inputBox.Position = UDim2.new(0,8,0,8)
+    inputBox.BackgroundTransparency = 1
+    inputBox.PlaceholderText = "Type a message..."
+    inputBox.Text = ""  inputBox.TextColor3 = Theme.Text
+    inputBox.Font = Enum.Font.Gotham  inputBox.TextSize = 12
+    inputBox.ClearTextOnFocus = false  inputBox.TextWrapped = true
+    inputBox.MultiLine = false  inputBox.TextXAlignment = Enum.TextXAlignment.Left
+
+    local sendBtn = Instance.new("TextButton", inputBG)
+    sendBtn.Size = UDim2.new(0,56,1,-16)  sendBtn.Position = UDim2.new(1,-62,0,8)
+    sendBtn.BackgroundColor3 = Theme.Accent  sendBtn.Text = "Send"
+    sendBtn.TextColor3 = Color3.new(1,1,1)  sendBtn.Font = Enum.Font.GothamBold
+    sendBtn.TextSize = 12  sendBtn.AutoButtonColor = false
+    Instance.new("UICorner",sendBtn).CornerRadius = UDim.new(0,6)
+    sendBtn.MouseEnter:Connect(function() tween(sendBtn,{BackgroundColor3=Theme.Accent:Lerp(Color3.new(1,1,1),0.15)},0.12) end)
+    sendBtn.MouseLeave:Connect(function() tween(sendBtn,{BackgroundColor3=Theme.Accent},0.12) end)
+
+    -- ── Message list ─────────────────────────────────────────
+    local listFrame = Instance.new("ScrollingFrame", panel)
+    listFrame.Name = "ChatList"
+    listFrame.Size = UDim2.new(1,-10,1,-110)  listFrame.Position = UDim2.new(0,5,0,40)
+    listFrame.BackgroundColor3 = Theme.BackgroundSecondary  listFrame.BorderSizePixel = 0
+    listFrame.ScrollBarThickness = 4  listFrame.CanvasSize = UDim2.new(0,0,0,0)
+    listFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+    Instance.new("UICorner", listFrame).CornerRadius = UDim.new(0,8)
+    local listLayout = Instance.new("UIListLayout", listFrame)
+    listLayout.Padding = UDim.new(0,2)  listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    local listPad = Instance.new("UIPadding", listFrame)
+    listPad.PaddingLeft = UDim.new(0,6)  listPad.PaddingRight = UDim.new(0,6)
+    listPad.PaddingTop = UDim.new(0,4)   listPad.PaddingBottom = UDim.new(0,4)
+
+    -- Empty-state label
+    local emptyLbl = Instance.new("TextLabel", listFrame)
+    emptyLbl.Name = "EmptyLbl"
+    emptyLbl.Size = UDim2.new(1,-12,0,40)  emptyLbl.Position = UDim2.new(0,6,0,8)
+    emptyLbl.BackgroundTransparency = 1
+    emptyLbl.Text = "No messages yet. Switch mode or say something!"
+    emptyLbl.TextColor3 = Theme.TextDim  emptyLbl.Font = Enum.Font.Gotham
+    emptyLbl.TextSize = 11  emptyLbl.TextWrapped = true
+    emptyLbl.TextXAlignment = Enum.TextXAlignment.Center
+    emptyLbl.LayoutOrder = 999999
+
+    -- Helper: add one message row to the list
+    local function addMessageRow(msg)
+        if emptyLbl and emptyLbl.Parent then emptyLbl:Destroy() end
+
+        local rank       = msg.rank or 0
+        local dispName   = msg.displayName or msg.username or "?"
+        local username   = msg.username or "?"
+        local rankLabel  = RANK_LABEL[rank]  or "SKA Free"
+        local rankColor  = RANK_CHAT_COLOR[rank] or Color3.fromRGB(160,160,160)
+        local msgText    = msg.message or ""
+
+        local row = Instance.new("Frame", listFrame)
+        row.Size = UDim2.new(1,-8,0,0)  -- height auto-set below
+        row.BackgroundTransparency = 1  row.BorderSizePixel = 0
+        row.LayoutOrder = math.floor((msg.timestamp or 0) * 1000)
+        row.AutomaticSize = Enum.AutomaticSize.Y
+
+        -- Rank colour bar on left
+        local bar = Instance.new("Frame", row)
+        bar.Size = UDim2.new(0,3,1,0)  bar.BackgroundColor3 = rankColor  bar.BorderSizePixel = 0
+        Instance.new("UICorner",bar).CornerRadius = UDim.new(0,2)
+
+        -- Header: "DisplayName" (SKA Rank)
+        local header = Instance.new("TextLabel", row)
+        header.Size = UDim2.new(1,-10,0,16)  header.Position = UDim2.new(0,9,0,2)
+        header.BackgroundTransparency = 1
+        header.Text = '"'..dispName..'" ('..rankLabel..')'
+        header.TextColor3 = rankColor  header.Font = Enum.Font.GothamBold
+        header.TextSize = 10  header.TextXAlignment = Enum.TextXAlignment.Left
+
+        -- Message body
+        local body = Instance.new("TextLabel", row)
+        body.Size = UDim2.new(1,-10,0,0)  body.Position = UDim2.new(0,9,0,18)
+        body.BackgroundTransparency = 1  body.AutomaticSize = Enum.AutomaticSize.Y
+        body.Text = msgText  body.TextColor3 = Theme.Text
+        body.Font = Enum.Font.Gotham  body.TextSize = 11
+        body.TextWrapped = true  body.TextXAlignment = Enum.TextXAlignment.Left
+
+        table.insert(msgRows, row)
+
+        -- Auto-scroll to bottom
+        task.defer(function()
+            local canvas = listLayout.AbsoluteContentSize.Y + 8
+            listFrame.CanvasSize = UDim2.new(0,0,0,canvas)
+            listFrame.CanvasPosition = Vector2.new(0, math.max(0, canvas - listFrame.AbsoluteSize.Y))
+        end)
+    end
+
+    -- ── Mode switching logic ──────────────────────────────────
+    local function switchMode(key)
+        currentMode   = key
+        lastTimestamp = 0   -- reset so we fetch recent history on mode change
+        -- Clear existing messages
+        for _, r in ipairs(msgRows) do pcall(function() r:Destroy() end) end
+        msgRows = {}
+        -- Re-add empty label
+        if not listFrame:FindFirstChild("EmptyLbl") then
+            local el = Instance.new("TextLabel", listFrame)
+            el.Name = "EmptyLbl"  el.Size = UDim2.new(1,-12,0,40)  el.Position = UDim2.new(0,6,0,8)
+            el.BackgroundTransparency = 1
+            el.Text = "No messages yet. Switch mode or say something!"
+            el.TextColor3 = Theme.TextDim  el.Font = Enum.Font.Gotham
+            el.TextSize = 11  el.TextWrapped = true
+            el.TextXAlignment = Enum.TextXAlignment.Center  el.LayoutOrder = 999999
+        end
+        -- Update button highlights
+        for k, b in pairs(modeButtons) do
+            b.BackgroundColor3 = (k==key) and Theme.Accent or Theme.BackgroundSecondary
+            b.TextColor3       = (k==key) and Color3.new(1,1,1) or Theme.TextDim
+        end
+    end
+
+    for _, md in ipairs(modeDefs) do
+        local key = md.Key
+        modeButtons[key].MouseButton1Click:Connect(function() switchMode(key) end)
+    end
+
+    -- ── Send message ─────────────────────────────────────────
+    local function sendMessage()
+        if not http_request then
+            notify("Chat","Bridge unavailable — HTTP not supported by this executor",3) return
+        end
+        local txt = inputBox.Text:match("^%s*(.-)%s*$")
+        if txt == "" then return end
+        inputBox.Text = ""
+
+        pcall(function()
+            http_request({
+                Url     = CONFIG.LocalHostURL.."/chat/send",
+                Method  = "POST",
+                Headers = {["Content-Type"]="application/json"},
+                Body    = HttpService:JSONEncode({
+                    username    = localPlayer.Name,
+                    displayName = localPlayer.DisplayName,
+                    rank        = LocalUser.Rank,
+                    message     = txt,
+                    mode        = currentMode,
+                    jobId       = game.JobId,
+                    placeId     = tostring(game.PlaceId),
+                })
+            })
+        end)
+    end
+
+    -- Wire up input box (already created above listFrame)
+    sendBtn.MouseButton1Click:Connect(sendMessage)
+    inputBox.FocusLost:Connect(function(enter)
+        if enter then sendMessage() end
+    end)
+
+    -- ── Auto-polling loop (every 3s, fully automatic) ────────
+    task.spawn(function()
+        while panel and panel.Parent do
+            task.wait(3)
+            if not http_request then continue end
+            -- Only poll if the Chat tab is visible (panel.Visible) to save requests
+            -- But we always poll so messages don't pile up when user switches tabs
+            pcall(function()
+                local params = "?mode="..currentMode.."&since="..string.format("%.3f", lastTimestamp)
+                if currentMode == "server" then
+                    params = params.."&jobId="..game.JobId
+                elseif currentMode == "game" then
+                    params = params.."&placeId="..tostring(game.PlaceId)
+                end
+                local res = http_request({ Url=CONFIG.LocalHostURL.."/chat/get"..params, Method="GET" })
+                if res and res.StatusCode == 200 and res.Body then
+                    local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+                    if ok and data.messages and #data.messages > 0 then
+                        for _, msg in ipairs(data.messages) do
+                            if (msg.timestamp or 0) > lastTimestamp then
+                                lastTimestamp = msg.timestamp
+                                addMessageRow(msg)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+
+    -- Chat panel must NOT scroll as a whole — only the message list scrolls.
+    -- Input bar is positionally fixed at the bottom of the visible area.
+    panel.CanvasSize = UDim2.new(0, 0, 0, 0)
+    panel.ScrollingEnabled = false
+    panel.ScrollBarThickness = 0
+end
+
+local function initialize()
+    -- Build UI
+    createMainUI()
+    createMiniButton()
+    createTopBar()
+    buildCombatPanel()
+    buildVisualsPanel()
+    buildAdminPanel()
+    buildChatPanel()
+    buildSettingsPanel()
+    buildCreditsPanel()
+    createAltConsole()
+
+    -- Nametag loop — RenderStepped matches working version exactly
+    RunService.RenderStepped:Connect(updateNametags)
+
+    -- Player removed cleanup
+    Players.PlayerRemoving:Connect(function(plr)
+        if Nametags[plr] then
+            pcall(function() Nametags[plr].Gui:Destroy()      end)
+            pcall(function() Nametags[plr].PortalGui:Destroy() end)
+            Nametags[plr]=nil
+        end
+        if Highlights[plr] then
+            pcall(function() Highlights[plr]:Destroy() end)
+            Highlights[plr]=nil
+        end
+    end)
+
+    -- Player added: rebuild nametag when character respawns
+    Players.PlayerAdded:Connect(function(plr)
+        plr.CharacterAdded:Connect(function()
+            task.wait(1)
+            if Nametags[plr] then
+                pcall(function() Nametags[plr].Gui:Destroy()      end)
+                pcall(function() Nametags[plr].PortalGui:Destroy() end)
+                Nametags[plr]=nil
+            end
+        end)
+    end)
+
+    -- Self respawn: rebuild own nametag
+    localPlayer.CharacterAdded:Connect(function()
+        task.wait(1)
+        if Nametags[localPlayer] then
+            pcall(function() Nametags[localPlayer].Gui:Destroy()      end)
+            pcall(function() Nametags[localPlayer].PortalGui:Destroy() end)
+            Nametags[localPlayer]=nil
+        end
+    end)
+
+    -- Apply initial theme
+    applyTheme()
+    updateStatus()
+
+    -- Ban / rank check after data loads
+    task.delay(2, function()
+        -- Re-fetch once more in case first attempt raced
+        fetchGitHub()
+        task.wait(0.5)
+        if LocalUser.IsBanned then
+            local msg = string.format(
+                "Banned from SKA by %s\nReason: %s",
+                tostring(LocalUser.BannedBy or "an admin"),
+                tostring(LocalUser.BanReason or "No reason given")
+            )
+            -- Destroy UI then kick
+            pcall(function()
+                if UI.MainFrame then UI.MainFrame:Destroy() end
+                if UI.TopBar    then UI.TopBar:Destroy()    end
+                if UI.MiniButton then UI.MiniButton:Destroy() end
+            end)
+            pcall(function() localPlayer:Kick(msg) end)
+        else
+            local tag = (RANK_INFO[LocalUser.Rank] and RANK_INFO[LocalUser.Rank].Tag) or LocalUser.Tag
+            notify("SKA Admin","v9.1 loaded  ·  "..tostring(tag), 4)
+            log("Init complete — Rank="..tostring(LocalUser.Rank).." Tag="..tostring(LocalUser.Tag))
+        end
+    end)
+
+    print("[SKA] v9.1 initialized — "..localPlayer.Name)
+end
+
+initialize()
