@@ -132,12 +132,12 @@ local CONFIG = {
     -- Example ngrok:      "https://xxxx.ngrok-free.app"
     -- Localhost only works on YOUR PC:
     LocalHostURL    = "https://ska-admin.onrender.com",
-    DiscordInvite   = "discord.gg/skaadmin", -- change to your real invite
+    DiscordInvite   = "https://discord.gg/qb3EWWfJ28", -- change to your real invite
     RefreshInterval = 30,
-    NametagDistance = 100,   -- studs: full nametag visible
-    PortalDistance  = 200,   -- studs: portal circle visible
-    BringOffset     = 5,     -- studs in front of player
-    DebugMode       = true,  -- set false once working
+    NametagDistance = 50,   -- studs: full nametag visible
+    PortalDistance  = 100,   -- studs: portal circle visible
+    BringOffset     = 4,     -- studs in front of player
+    DebugMode       = false,  -- set false once working
 }
 
 -- ============================================================
