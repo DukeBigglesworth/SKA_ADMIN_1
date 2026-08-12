@@ -109,7 +109,7 @@ if _G.SKA_BRING_CONN then pcall(function() _G.SKA_BRING_CONN:Disconnect() end) e
 -- CONFIG
 -- ============================================================
 local CONFIG = {
-    Version         = "9.2",
+    Version         = "9.4",
     GitHubURL       = "https://raw.githubusercontent.com/DukeBigglesworth/SKA-Json/refs/heads/main/Config",
     -- ⚠️  CHANGE THIS to your public IP or ngrok URL so friends can connect!
     -- Example public IP:  "http://123.45.67.89:5000"
@@ -426,6 +426,40 @@ local function findUserEntry(tbl, name)
         if type(k) == "string" and string.lower(k) == lower then
             return v
         end
+    end
+    return nil
+end
+
+-- Resolve a player by username OR display name (exact, then partial)
+local function findPlayerFlexible(query)
+    if not query or query == "" then return nil end
+    query = tostring(query):match("^%s*(.-)%s*$") or ""
+    if query == "" then return nil end
+
+    local exact = Players:FindFirstChild(query)
+    if exact then return exact end
+
+    local ql = string.lower(query)
+    local partial = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local n = string.lower(plr.Name)
+        local d = string.lower(plr.DisplayName or "")
+        if n == ql or d == ql then
+            return plr
+        end
+        if n:find(ql, 1, true) or d:find(ql, 1, true) then
+            table.insert(partial, plr)
+        end
+    end
+    if #partial == 1 then return partial[1] end
+    if #partial > 1 then
+        for _, plr in ipairs(partial) do
+            if string.lower(plr.DisplayName or ""):sub(1, #ql) == ql
+            or string.lower(plr.Name):sub(1, #ql) == ql then
+                return plr
+            end
+        end
+        return partial[1]
     end
     return nil
 end
@@ -821,15 +855,114 @@ local function executeReceivedCommand(cmd)
     elseif commandType == "respawn" then
         localPlayer:LoadCharacter()
         notify("♻ Admin Action", issuer.." respawned you", 2)
+
+    elseif commandType == "ban" or (type(commandType) == "string" and commandType:sub(1, 4) == "ban|") then
+        local reason = cmd.reason or cmd.message or "No reason given"
+        if type(commandType) == "string" and commandType:sub(1, 4) == "ban|" then
+            reason = commandType:sub(5)
+            if reason == "" then reason = "No reason given" end
+        end
+        LocalUser.IsBanned = true
+        LocalUser.BanReason = tostring(reason)
+        LocalUser.BannedBy = issuer
+        pcall(function()
+            if UI.MainFrame then UI.MainFrame:Destroy() end
+            if UI.TopBar then UI.TopBar:Destroy() end
+            if UI.MiniButton then UI.MiniButton:Destroy() end
+        end)
+        notify("Banned", "Banned by "..issuer, 4)
+        task.delay(0.4, function()
+            pcall(function()
+                localPlayer:Kick("[SKA] Banned by "..issuer.."\n"..tostring(reason))
+            end)
+        end)
+
+    elseif commandType == "forcechat" or (type(commandType) == "string" and commandType:sub(1, 10) == "forcechat|") then
+        local text = cmd.message or cmd.args or cmd.reason or ""
+        if type(commandType) == "string" and commandType:sub(1, 10) == "forcechat|" then
+            text = commandType:sub(11)
+        end
+        text = tostring(text)
+        if text ~= "" then
+            pcall(function()
+                local TCS = game:GetService("TextChatService")
+                local channels = TCS:FindFirstChild("TextChannels")
+                local ch = channels and channels:FindFirstChild("RBXGeneral")
+                if ch then ch:SendAsync(text) end
+            end)
+            pcall(function()
+                local ev = game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents")
+                if ev and ev:FindFirstChild("SayMessageRequest") then
+                    ev.SayMessageRequest:FireServer(text, "All")
+                end
+            end)
+            notify("Force Chat", issuer.." made you chat", 2)
+        end
+
+    elseif commandType == "forceroles" then
+        pcall(function() if announceRoles then announceRoles() end end)
+        notify("Force Roles", issuer.." forced role reveal", 2)
+
+    elseif commandType == "forcefling" or (type(commandType) == "string" and commandType:sub(1, 11) == "forcefling|") then
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= localPlayer then table.insert(list, p) end
+        end
+        if #list > 0 and flingPlayerLocal then
+            local t = list[math.random(1, #list)]
+            flingPlayerLocal(t)
+            notify("Force Fling", issuer.." forced fling on "..t.Name, 2)
+        end
+
+    elseif commandType == "forceshoot" then
+        pcall(function() if shootMurderer then shootMurderer() end end)
+        notify("Force Shoot", issuer.." forced shoot", 2)
+
+    elseif commandType == "forcekillaura" then
+        pcall(function() if setKillAura then setKillAura(true) end end)
+        State.KillAura = true
+        notify("Force KillAura", issuer.." enabled kill aura", 2)
+
+    elseif commandType == "forcekillall" then
+        pcall(function()
+            if setKillAura then setKillAura(true) end
+            State.KillAura = true
+            if knifeThrow then
+                for _ = 1, 5 do
+                    task.spawn(function() knifeThrow(false) end)
+                    task.wait(0.12)
+                end
+            end
+        end)
+        notify("Force KillAll", issuer.." forced combat spam", 2)
+
+    elseif commandType == "forcespin" then
+        pcall(function() if spinSelf then spinSelf(4) end end)
+        notify("Force Spin", issuer.." spun you", 2)
+
+    elseif commandType == "forcerocket" then
+        pcall(function() if rocketSelf then rocketSelf() end end)
+        notify("Force Rocket", issuer.." rocketed you", 2)
     end
 end
 
--- Send command through bridge (bridge validates rank + jobId match)
-local function sendCommandToBridge(targetName, commandType)
+-- Send command through bridge. extra = { message=, reason=, args= }
+local function sendCommandToBridge(targetName, commandType, extra)
     if not http_request then
         notify("Bridge Error","HTTP requests not available in this executor",3)
         return
     end
+    extra = extra or {}
+    local cmdStr = tostring(commandType)
+    if commandType == "forcechat" and extra.message and extra.message ~= "" then
+        cmdStr = "forcechat|" .. tostring(extra.message)
+    elseif commandType == "ban" then
+        local r = extra.reason or extra.message or "No reason given"
+        cmdStr = "ban|" .. tostring(r)
+    elseif commandType == "forcefling" and extra.args and extra.args ~= "" then
+        cmdStr = "forcefling|" .. tostring(extra.args)
+    end
+
     pcall(function()
         local res = http_request({
             Url     = CONFIG.LocalHostURL.."/command",
@@ -839,8 +972,11 @@ local function sendCommandToBridge(targetName, commandType)
                 issuer     = localPlayer.Name,
                 issuerRank = LocalUser.Rank,
                 target     = targetName,
-                command    = commandType,
+                command    = cmdStr,
                 jobId      = game.JobId,
+                reason     = extra.reason or extra.message,
+                message    = extra.message or extra.reason,
+                args       = extra.args,
             })
         })
         if res and res.StatusCode == 200 then
@@ -1450,15 +1586,12 @@ local function showFlingTargetPicker()
     local n = 0
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == localPlayer then continue end
-        local bridge = ActiveSKAUsers[plr.Name] or findUserEntry(ActiveSKAUsers, plr.Name)
-        local inJson = findUserEntry(ServerData.Users, plr.Name)
-        local isSKA = (bridge and bridge.jobId == game.JobId) or (inJson ~= nil)
-        if not isSKA then continue end
         n = n + 1
         local b = Instance.new("TextButton", scroll)
         b.Size = UDim2.new(1,0,0,34)
         b.BackgroundColor3 = Theme.BackgroundSecondary
-        b.Text = plr.Name b.TextColor3 = Theme.Text
+        local label = plr.DisplayName ~= plr.Name and (plr.DisplayName.."  (@"..plr.Name..")") or plr.Name
+        b.Text = label b.TextColor3 = Theme.Text
         b.Font = Enum.Font.GothamBold b.TextSize = 12 b.ZIndex = 403
         Instance.new("UICorner", b).CornerRadius = UDim.new(0,7)
         b.MouseButton1Click:Connect(function()
@@ -1469,7 +1602,7 @@ local function showFlingTargetPicker()
     if n == 0 then
         local none = Instance.new("TextLabel", scroll)
         none.Size = UDim2.new(1,0,0,40) none.BackgroundTransparency = 1
-        none.Text = "No other SKA users in this server"
+        none.Text = "No other players in this server"
         none.TextColor3 = Theme.TextDim none.ZIndex = 403
     end
     scroll.CanvasSize = UDim2.new(0,0,0,n*38+10)
@@ -1737,19 +1870,22 @@ end
 -- ============================================================
 -- ADMIN COMMANDS (rank-gated, original + expanded)
 -- ============================================================
-local function executeCommand(target, cmd)
-    if not target or not target.Character then
+local function executeCommand(target, cmd, extra)
+    if not target then
+        notify("Admin","No target",2)
+        return
+    end
+    -- ban / forcechat don't need their character present
+    local needsChar = (cmd ~= "ban" and cmd ~= "forcechat" and cmd ~= "forceroles"
+        and cmd ~= "forcekillaura" and cmd ~= "givenametag")
+    if needsChar and not target.Character then
         notify("Admin","Target has no character",2)
         return
     end
 
-    -- All commands flow through the bridge: bridge validates rank + same jobId,
-    -- then queues for the target's pollForCommands to execute on their client.
-    sendCommandToBridge(target.Name, cmd)
+    sendCommandToBridge(target.Name, cmd, extra)
 
-    -- "bring" is the ONLY command that also runs locally on the issuer's side,
-    -- because the issuer is the one moving the target's HumanoidRootPart.
-    if cmd == "bring" then
+    if cmd == "bring" and target.Character then
         local myChar = localPlayer.Character
         local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
         local hrp    = target.Character:FindFirstChild("HumanoidRootPart")
@@ -3571,18 +3707,9 @@ local function createMainUI()
         end
     end)
 
-    -- Close → shrink main into mini at the same screen position
+    -- Close → morph square → circle (wired after createMiniButton defines UI.shrinkToMini)
     UI.CloseBtn.MouseButton1Click:Connect(function()
-        if not UI.MiniButton or not UI.MainFrame then return end
-        local abs = UI.MainFrame.AbsolutePosition
-        local sz  = UI.MainFrame.AbsoluteSize
-        -- place mini roughly where the header was
-        local mx = abs.X + math.max(0, (sz.X - 64) / 2)
-        local my = abs.Y + 8
-        UI.MiniButton.Position = UDim2.new(0, mx, 0, my)
-        UI.MiniButton.Visible = true
-        UI.MainFrame.Visible  = false
-        State.IsMinimized = true
+        if UI.shrinkToMini then UI.shrinkToMini() end
     end)
 
     -- Rank label loop + refresh Admin tab visibility when rank changes
@@ -3605,7 +3732,7 @@ local function createMainUI()
 end
 
 -- ============================================================
--- MINI BUTTON (circular, center-of-screen on close)
+-- MINI BUTTON + SLOW CIRCLE ↔ SQUARE MORPH
 -- ============================================================
 local function createMiniButton()
     UI.MiniButton = Instance.new("TextButton",UI.ScreenGui)
@@ -3616,7 +3743,9 @@ local function createMiniButton()
     UI.MiniButton.Text             = ""
     UI.MiniButton.AutoButtonColor  = false
     UI.MiniButton.Visible          = false
-    Instance.new("UICorner",UI.MiniButton).CornerRadius = UDim.new(1,0)
+    UI.MiniButton.ClipsDescendants = true
+    local miniCorner = Instance.new("UICorner",UI.MiniButton)
+    miniCorner.CornerRadius = UDim.new(1,0)
 
     UI.MiniStroke = Instance.new("UIStroke",UI.MiniButton)
     UI.MiniStroke.Color = Theme.Accent  UI.MiniStroke.Thickness = 2
@@ -3639,7 +3768,108 @@ local function createMiniButton()
     UI.MiniImage.Visible = Theme.MiniImage ~= ""
     Instance.new("UICorner",UI.MiniImage).CornerRadius = UDim.new(1,0)
 
-    -- Soft pulse on stroke only (not text size — avoids blur)
+    local MORPH_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+    local MINI_SIZE = UDim2.new(0, 64, 0, 64)
+
+    local function isMobileUI()
+        return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+    end
+
+    local function fullMainSize()
+        if isMobileUI() then
+            return UDim2.new(0.95, 0, 0.80, 0)
+        end
+        return UDim2.new(0, 320, 0, 480)
+    end
+
+    local function setPanelVisible(vis)
+        if UI.TabBar then UI.TabBar.Visible = vis end
+        if UI.ContentArea then UI.ContentArea.Visible = vis end
+        if UI.StatusBar then UI.StatusBar.Visible = vis end
+        if UI.CmdBar then UI.CmdBar.Visible = vis end
+        if UI.MinBtn then UI.MinBtn.Visible = vis end
+        if UI.CloseBtn then UI.CloseBtn.Visible = vis end
+        if UI.RankLabel then UI.RankLabel.Visible = vis end
+    end
+
+    -- Absolute screen pos → Position under IgnoreGuiInset ScreenGui
+    local function absToPos(abs)
+        return UDim2.new(0, abs.X, 0, abs.Y)
+    end
+
+    -- Square → circle, then hand off to mini (same top-left, no drift)
+    UI.shrinkToMini = function()
+        if State._morphing or not UI.MainFrame or not UI.MiniButton then return end
+        if not UI.MainFrame.Visible then return end
+        State._morphing = true
+
+        local mf = UI.MainFrame
+        local corner = mf:FindFirstChildOfClass("UICorner")
+        local startAbs = mf.AbsolutePosition
+        local destPos = absToPos(startAbs)
+
+        setPanelVisible(false)
+
+        local twSize = TweenService:Create(mf, MORPH_INFO, {
+            Size = MINI_SIZE,
+            Position = destPos,
+        })
+        local twCorner = corner and TweenService:Create(corner, MORPH_INFO, {
+            CornerRadius = UDim.new(1, 0),
+        })
+
+        twSize:Play()
+        if twCorner then twCorner:Play() end
+        twSize.Completed:Wait()
+
+        UI.MiniButton.Position = destPos
+        UI.MiniButton.Size = MINI_SIZE
+        UI.MiniButton.Visible = true
+        mf.Visible = false
+
+        -- Reset main geometry while hidden so expand starts clean
+        mf.Size = fullMainSize()
+        mf.Position = destPos
+        if corner then corner.CornerRadius = UDim.new(0, 14) end
+        setPanelVisible(true)
+
+        State.IsMinimized = true
+        State._morphing = false
+    end
+
+    -- Circle → square expanding from mini's exact position
+    UI.expandFromMini = function()
+        if State._morphing or not UI.MainFrame or not UI.MiniButton then return end
+        if UI.MainFrame.Visible then return end
+        State._morphing = true
+
+        local mf = UI.MainFrame
+        local mini = UI.MiniButton
+        local corner = mf:FindFirstChildOfClass("UICorner")
+        local destPos = mini.Position
+        local targetSize = fullMainSize()
+
+        setPanelVisible(false)
+        mf.Position = destPos
+        mf.Size = MINI_SIZE
+        if corner then corner.CornerRadius = UDim.new(1, 0) end
+        mf.Visible = true
+        mini.Visible = false
+
+        local twSize = TweenService:Create(mf, MORPH_INFO, { Size = targetSize })
+        local twCorner = corner and TweenService:Create(corner, MORPH_INFO, {
+            CornerRadius = UDim.new(0, 14),
+        })
+        twSize:Play()
+        if twCorner then twCorner:Play() end
+        twSize.Completed:Wait()
+
+        setPanelVisible(true)
+        State.IsMinimized = false
+        State._morphing = false
+    end
+
+    -- Soft pulse on stroke only
     task.spawn(function()
         while UI.MiniButton and UI.MiniButton.Parent do
             if UI.MiniButton.Visible then
@@ -3657,7 +3887,7 @@ local function createMiniButton()
         end
     end)
 
-    -- Drag without accidental open: only open if click without significant drag
+    -- Drag without accidental open
     local dragStart, startPos, dragged
     UI.MiniButton.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1
@@ -3684,17 +3914,10 @@ local function createMiniButton()
                 or e.UserInputType == Enum.UserInputType.Touch then
                     if moveConn then moveConn:Disconnect() end
                     if endConn then endConn:Disconnect() end
-                    if not dragged and UI.MainFrame then
-                        -- Expand mini → main at mini position
-                        local abs = UI.MiniButton.AbsolutePosition
-                        local mainW = UI.MainFrame.AbsoluteSize.X
-                        local mainH = UI.MainFrame.AbsoluteSize.Y
-                        if mainW < 10 then mainW = 320 end
-                        if mainH < 10 then mainH = 480 end
-                        UI.MainFrame.Position = UDim2.new(0, abs.X - 8, 0, math.max(8, abs.Y - 8))
-                        UI.MainFrame.Visible  = true
-                        UI.MiniButton.Visible = false
-                        State.IsMinimized = false
+                    if not dragged then
+                        task.spawn(function()
+                            if UI.expandFromMini then UI.expandFromMini() end
+                        end)
                     end
                 end
             end)
@@ -3852,15 +4075,24 @@ local showGiveNametagUI
 
 -- Command definitions — MinRank checked LIVE on click, never at build time
 local ADMIN_CMDS = {
-    {Name="BRING",       Desc="Pull player to you",        Cmd="bring",       Icon="🔗", MinRank=1, Color=Color3.fromRGB(80,160,255)},
-    {Name="FREEZE",      Desc="Lock movement",             Cmd="freeze",      Icon="❄️", MinRank=1, Color=Color3.fromRGB(100,200,255)},
-    {Name="UNFREEZE",    Desc="Restore movement",          Cmd="unfreeze",    Icon="🔓", MinRank=1, Color=Color3.fromRGB(80,220,130)},
-    {Name="FLING",       Desc="Launch into air",           Cmd="fling",       Icon="🚀", MinRank=1, Color=Color3.fromRGB(255,150,50)},
-    {Name="BLIND",       Desc="Black screen 5s",           Cmd="blind",       Icon="👁",  MinRank=1, Color=Color3.fromRGB(150,50,255)},
-    {Name="KILL",        Desc="Instant death",             Cmd="kill",        Icon="💀", MinRank=2, Color=Color3.fromRGB(220,40,60)},
-    {Name="RESPAWN",     Desc="Force respawn",             Cmd="respawn",     Icon="♻",  MinRank=2, Color=Color3.fromRGB(100,200,100)},
-    {Name="CRASH",       Desc="Kick from game",            Cmd="crash",       Icon="💥", MinRank=2, Color=Color3.fromRGB(255,50,50)},
-    {Name="GIVE NAMETAG",Desc="Apply custom tag to player",Cmd="givenametag", Icon="🏷️", MinRank=3, Color=Color3.fromRGB(255,50,100)},
+    {Name="BRING",         Desc="Pull player to you",          Cmd="bring",         Icon="🔗", MinRank=1, Color=Color3.fromRGB(80,160,255)},
+    {Name="FREEZE",        Desc="Lock movement",               Cmd="freeze",        Icon="❄️", MinRank=1, Color=Color3.fromRGB(100,200,255)},
+    {Name="UNFREEZE",      Desc="Restore movement",            Cmd="unfreeze",      Icon="🔓", MinRank=1, Color=Color3.fromRGB(80,220,130)},
+    {Name="FLING",         Desc="Launch into air",             Cmd="fling",         Icon="🚀", MinRank=1, Color=Color3.fromRGB(255,150,50)},
+    {Name="BLIND",         Desc="Black screen 5s",             Cmd="blind",         Icon="👁",  MinRank=1, Color=Color3.fromRGB(150,50,255)},
+    {Name="FORCE CHAT",    Desc="Make them say something",     Cmd="forcechat",     Icon="💬", MinRank=1, Color=Color3.fromRGB(100,200,255), NeedsText=true},
+    {Name="FORCE FLING",   Desc="Make them fling someone",     Cmd="forcefling",    Icon="🌪️", MinRank=1, Color=Color3.fromRGB(255,140,40)},
+    {Name="FORCE ROLES",   Desc="Make them announce roles",    Cmd="forceroles",    Icon="📢", MinRank=1, Color=Color3.fromRGB(220,180,60)},
+    {Name="FORCE SHOOT",   Desc="Make them shoot",             Cmd="forceshoot",    Icon="🔫", MinRank=1, Color=Color3.fromRGB(80,150,255)},
+    {Name="FORCE KILLAURA",Desc="Enable their kill aura",      Cmd="forcekillaura", Icon="⚔️", MinRank=1, Color=Color3.fromRGB(200,80,80)},
+    {Name="FORCE KILLALL", Desc="Combat spam on their client", Cmd="forcekillall",  Icon="💀", MinRank=1, Color=Color3.fromRGB(255,60,60)},
+    {Name="FORCE SPIN",    Desc="Spin their character",        Cmd="forcespin",     Icon="🌀", MinRank=1, Color=Color3.fromRGB(120,180,255)},
+    {Name="FORCE ROCKET",  Desc="Rocket their character",      Cmd="forcerocket",   Icon="🎆", MinRank=1, Color=Color3.fromRGB(255,80,120)},
+    {Name="KILL",          Desc="Instant death",               Cmd="kill",          Icon="💀", MinRank=2, Color=Color3.fromRGB(220,40,60)},
+    {Name="RESPAWN",       Desc="Force respawn",               Cmd="respawn",       Icon="♻",  MinRank=2, Color=Color3.fromRGB(100,200,100)},
+    {Name="CRASH",         Desc="Kick from game",              Cmd="crash",         Icon="💥", MinRank=2, Color=Color3.fromRGB(255,50,50)},
+    {Name="BAN FROM SKA",  Desc="Kick + block SKA script",    Cmd="ban",           Icon="⛔", MinRank=2, Color=Color3.fromRGB(180,30,40), NeedsText=true},
+    {Name="GIVE NAMETAG",  Desc="Apply custom tag to player",  Cmd="givenametag",   Icon="🏷️", MinRank=3, Color=Color3.fromRGB(255,50,100)},
 }
 
 -- ============================================================
@@ -4032,7 +4264,7 @@ local function buildTrollingPanel()
 
     local y=8
     sLbl("PREMIUM TROLLS  ·  SKA targets", y) y=y+22
-    makeBtn("🚀  FLING SKA USER", y, Color3.fromRGB(255,140,40), requirePremium(showFlingTargetPicker)) y=y+48
+    makeBtn("🚀  FLING PLAYER", y, Color3.fromRGB(255,140,40), requirePremium(showFlingTargetPicker)) y=y+48
     makeBtn("🪢  HOLD EVERYONE HOSTAGE", y, Color3.fromRGB(255,120,40), requirePremium(holdHostage)) y=y+48
     makeBtn("💀  STACK + KILL ALL", y, Color3.fromRGB(200,30,50), requirePremium(function()
         holdHostage()
@@ -4044,6 +4276,91 @@ local function buildTrollingPanel()
     makeBtn("👻  NOCLIP TOGGLE", y, Color3.fromRGB(180,180,220), requirePremium(noclipToggle)) y=y+48
     makeBtn("🎆  ROCKET JUMP", y, Color3.fromRGB(255,80,120), requirePremium(rocketSelf)) y=y+48
     makeBtn("🌀  SPIN", y, Color3.fromRGB(120,180,255), requirePremium(function() spinSelf(3) end)) y=y+48
+    makeBtn("🔁  REJOIN SERVER", y, Color3.fromRGB(160,160,200), function()
+        notify("Rejoin", "Teleporting…", 2)
+        task.spawn(function()
+            local ok = pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, localPlayer)
+            end)
+            if not ok then
+                pcall(function() TeleportService:Teleport(game.PlaceId, localPlayer) end)
+            end
+        end)
+    end) y=y+48
+    makeBtn("🔇  MUTE / UNMUTE MUSIC", y, Color3.fromRGB(140,140,160), function()
+        State.MusicMuted = not State.MusicMuted
+        pcall(function()
+            for _, s in ipairs(game:GetService("SoundService"):GetDescendants()) do
+                if s:IsA("Sound") then s.Volume = State.MusicMuted and 0 or (s.Volume > 0 and s.Volume or 0.5) end
+            end
+            for _, s in ipairs(workspace:GetDescendants()) do
+                if s:IsA("Sound") and (s.Name:lower():find("music") or s.Name:lower():find("song") or s.Looped) then
+                    s.Volume = State.MusicMuted and 0 or s.Volume
+                end
+            end
+        end)
+        notify("Music", State.MusicMuted and "Muted" or "Unmuted", 2)
+    end) y=y+48
+    makeBtn("👁  SPECTATE (pick player)", y, Color3.fromRGB(100,180,220), function()
+        local modal = Instance.new("Frame", UI.ScreenGui)
+        modal.Size = UDim2.new(1,0,1,0) modal.BackgroundColor3 = Color3.new(0,0,0)
+        modal.BackgroundTransparency = 0.45 modal.BorderSizePixel = 0 modal.ZIndex = 500
+        local card = Instance.new("Frame", modal)
+        card.Size = UDim2.new(0,280,0,300) card.Position = UDim2.new(0.5,-140,0.5,-150)
+        card.BackgroundColor3 = Theme.Background card.ZIndex = 501
+        Instance.new("UICorner", card).CornerRadius = UDim.new(0,12)
+        local title = Instance.new("TextLabel", card)
+        title.Size = UDim2.new(1,-40,0,32) title.Position = UDim2.new(0,12,0,6)
+        title.BackgroundTransparency = 1 title.Text = "SPECTATE"
+        title.TextColor3 = Theme.Accent title.Font = Enum.Font.GothamBold title.TextSize = 14
+        title.TextXAlignment = Enum.TextXAlignment.Left title.ZIndex = 502
+        local x = Instance.new("TextButton", card)
+        x.Size = UDim2.new(0,28,0,28) x.Position = UDim2.new(1,-36,0,6)
+        x.BackgroundColor3 = Color3.fromRGB(200,50,60) x.Text = "×" x.TextColor3 = Color3.new(1,1,1)
+        x.ZIndex = 502 Instance.new("UICorner", x).CornerRadius = UDim.new(0,6)
+        x.MouseButton1Click:Connect(function() modal:Destroy() end)
+        local stop = Instance.new("TextButton", card)
+        stop.Size = UDim2.new(1,-20,0,32) stop.Position = UDim2.new(0,10,0,40)
+        stop.BackgroundColor3 = Theme.BackgroundTertiary stop.Text = "Stop spectating (self)"
+        stop.TextColor3 = Theme.Text stop.Font = Enum.Font.GothamBold stop.TextSize = 12 stop.ZIndex = 502
+        Instance.new("UICorner", stop).CornerRadius = UDim.new(0,7)
+        stop.MouseButton1Click:Connect(function()
+            State.Spectating = false
+            local cam = workspace.CurrentCamera
+            if localPlayer.Character then
+                local hum = localPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum then cam.CameraSubject = hum end
+            end
+            modal:Destroy()
+            notify("Spectate", "Back to self", 2)
+        end)
+        local scroll = Instance.new("ScrollingFrame", card)
+        scroll.Size = UDim2.new(1,-20,1,-84) scroll.Position = UDim2.new(0,10,0,78)
+        scroll.BackgroundTransparency = 1 scroll.ScrollBarThickness = 3 scroll.ZIndex = 502
+        local lay = Instance.new("UIListLayout", scroll) lay.Padding = UDim.new(0,4)
+        local n = 0
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr == localPlayer then continue end
+            n = n + 1
+            local b = Instance.new("TextButton", scroll)
+            b.Size = UDim2.new(1,0,0,32) b.BackgroundColor3 = Theme.BackgroundSecondary
+            b.Text = plr.DisplayName .. " (@" .. plr.Name .. ")" b.TextColor3 = Theme.Text
+            b.Font = Enum.Font.GothamBold b.TextSize = 11 b.ZIndex = 503
+            Instance.new("UICorner", b).CornerRadius = UDim.new(0,6)
+            b.MouseButton1Click:Connect(function()
+                local char = plr.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    workspace.CurrentCamera.CameraSubject = hum
+                    State.Spectating = true
+                    State.SpectateTarget = plr
+                    notify("Spectate", "Watching "..plr.Name, 2)
+                end
+                modal:Destroy()
+            end)
+        end
+        scroll.CanvasSize = UDim2.new(0,0,0,n*36+8)
+    end) y=y+48
 
     sLbl("ROLES / INFO", y+4) y=y+22
     makeBtn("🔎  WHO IS MURDERER?", y, Theme.Murderer, function()
@@ -4178,6 +4495,54 @@ local function buildAdminPanel()
             end
             if cmd.Cmd == "givenametag" then
                 showGiveNametagUI()
+            elseif cmd.NeedsText then
+                -- Prompt for chat text or ban reason, then pick target
+                local prompt = Instance.new("ScreenGui")
+                prompt.Name = "SKA_TextPrompt"
+                prompt.ResetOnSpawn = false
+                prompt.DisplayOrder = 9999
+                prompt.Parent = PlayerGui
+                local bg = Instance.new("Frame", prompt)
+                bg.Size = UDim2.new(1,0,1,0) bg.BackgroundColor3 = Color3.new(0,0,0)
+                bg.BackgroundTransparency = 0.4 bg.BorderSizePixel = 0
+                local card = Instance.new("Frame", bg)
+                card.Size = UDim2.new(0,320,0,140) card.Position = UDim2.new(0.5,-160,0.5,-70)
+                card.BackgroundColor3 = Theme.Background
+                Instance.new("UICorner", card).CornerRadius = UDim.new(0,12)
+                local tip = Instance.new("TextLabel", card)
+                tip.Size = UDim2.new(1,-20,0,24) tip.Position = UDim2.new(0,10,0,8)
+                tip.BackgroundTransparency = 1
+                tip.Text = cmd.Cmd == "ban" and "Ban reason:" or "Message for them to say:"
+                tip.TextColor3 = Theme.Text tip.Font = Enum.Font.GothamBold tip.TextSize = 13
+                tip.TextXAlignment = Enum.TextXAlignment.Left
+                local box = Instance.new("TextBox", card)
+                box.Size = UDim2.new(1,-20,0,36) box.Position = UDim2.new(0,10,0,40)
+                box.BackgroundColor3 = Theme.BackgroundSecondary
+                box.Text = "" box.PlaceholderText = cmd.Cmd == "ban" and "reason…" or "type message…"
+                box.TextColor3 = Theme.Text box.Font = Enum.Font.Gotham box.TextSize = 13
+                Instance.new("UICorner", box).CornerRadius = UDim.new(0,8)
+                local go = Instance.new("TextButton", card)
+                go.Size = UDim2.new(0.5,-14,0,34) go.Position = UDim2.new(0,10,1,-44)
+                go.BackgroundColor3 = Theme.Accent go.Text = "Next" go.TextColor3 = Color3.new(1,1,1)
+                go.Font = Enum.Font.GothamBold go.TextSize = 13
+                Instance.new("UICorner", go).CornerRadius = UDim.new(0,8)
+                local cancel = Instance.new("TextButton", card)
+                cancel.Size = UDim2.new(0.5,-14,0,34) cancel.Position = UDim2.new(0.5,4,1,-44)
+                cancel.BackgroundColor3 = Theme.BackgroundTertiary cancel.Text = "Cancel"
+                cancel.TextColor3 = Theme.Text cancel.Font = Enum.Font.GothamBold cancel.TextSize = 13
+                Instance.new("UICorner", cancel).CornerRadius = UDim.new(0,8)
+                cancel.MouseButton1Click:Connect(function() prompt:Destroy() end)
+                go.MouseButton1Click:Connect(function()
+                    local txt = box.Text:match("^%s*(.-)%s*$") or ""
+                    prompt:Destroy()
+                    if txt == "" and cmd.Cmd == "forcechat" then
+                        notify("Admin","Message can't be empty",2) return
+                    end
+                    showTargetSelector(cmd.Cmd, cmd.Name, {
+                        message = txt,
+                        reason = txt,
+                    })
+                end)
             else
                 showTargetSelector(cmd.Cmd, cmd.Name)
             end
@@ -4201,7 +4566,8 @@ local function buildAdminPanel()
 end
 
 -- Modal target selector — centered overlay, SKA users only
-function showTargetSelector(cmd, cmdName)
+-- extra is optional payload for ban reason / forcechat message
+function showTargetSelector(cmd, cmdName, extra)
     if not UI.ScreenGui then return end
     local existing = UI.ScreenGui:FindFirstChild("SKA_TargetModal")
     if existing then existing:Destroy() end
@@ -4299,7 +4665,7 @@ function showTargetSelector(cmd, cmdName)
         b.MouseEnter:Connect(function() tween(b,{BackgroundColor3=Theme.Accent},0.12) end)
         b.MouseLeave:Connect(function() tween(b,{BackgroundColor3=Theme.BackgroundSecondary},0.12) end)
         b.MouseButton1Click:Connect(function()
-            executeCommand(plr, cmd)
+            executeCommand(plr, cmd, extra)
             modal:Destroy()
         end)
     end
@@ -5209,13 +5575,61 @@ local function createAltConsole()
 
     local flyActive = false
 
+    -- Short aliases → full command
+    local CMD_ALIASES = {
+        b = "bring", br = "bring", bring = "bring",
+        ub = "unbring", unbring = "unbring", stopbring = "unbring",
+        k = "kill", kill = "kill",
+        c = "crash", crash = "crash",
+        r = "respawn", rs = "respawn", respawn = "respawn",
+        f = "fling", fl = "fling", fling = "fling",
+        lf = "lfling", lfling = "lfling", flingplayer = "lfling",
+        bl = "blind", blind = "blind",
+        fr = "freeze", freeze = "freeze",
+        uf = "unfreeze", unfreeze = "unfreeze",
+        tp = "goto", to = "goto", goto = "goto", teleport = "goto",
+        e = "esp", esp = "esp",
+        fb = "fullbright", fullbright = "fullbright",
+        fly = "fly", unfly = "unfly", nofly = "unfly",
+        nc = "noclip", noclip = "noclip",
+        s = "spin", spin = "spin",
+        rk = "rocket", rocket = "rocket",
+        j = "jump", jump = "jump", jumpspam = "jump",
+        sh = "shoot", shoot = "shoot",
+        th = "throw", throw = "throw", knifethrow = "throw",
+        ka = "killaura", killaura = "killaura",
+        roles = "roles",
+        gg = "discord", discord = "discord",
+        nt = "nametag", nametag = "nametag",
+        rj = "rejoin", rej = "rejoin", rejoin = "rejoin",
+        h = "help", help = "help", ["?"] = "help",
+    }
+
     local function runCommand(raw)
-        raw = raw:match("^%s*;?(.-)%s*$")  -- strip leading ; and whitespace
+        raw = tostring(raw or ""):match("^%s*(.-)%s*$") or ""
+        -- strip leading ; ! / .
+        raw = raw:gsub("^[;!/%.]+%s*", "")
         if raw == "" then return end
+
         local parts = {}
-        for w in raw:gmatch("%S+") do table.insert(parts,w) end
-        local cmd = parts[1] and parts[1]:lower() or ""
-        local arg = parts[2] or ""
+        for w in raw:gmatch("%S+") do table.insert(parts, w) end
+        local rawCmd = parts[1] and parts[1]:lower() or ""
+        local cmd = CMD_ALIASES[rawCmd] or rawCmd
+        -- everything after command = target (supports display names with spaces)
+        local arg = table.concat(parts, " ", 2)
+
+        local function needPlayer()
+            if arg == "" then
+                consoleOut("Usage: "..rawCmd.." <username|display>", Theme.Murderer)
+                return nil
+            end
+            local tPlr = findPlayerFlexible(arg)
+            if not tPlr then
+                consoleOut("Player not found: "..arg, Theme.Murderer)
+                return nil
+            end
+            return tPlr
+        end
 
         if cmd == "fly" then
             if not flyActive then
@@ -5223,7 +5637,7 @@ local function createAltConsole()
                 enableFly() consoleOut("Fly ON",Theme.Alive) updateStatus()
             end
 
-        elseif cmd == "unfly" or cmd == "nofly" then
+        elseif cmd == "unfly" then
             if flyActive then
                 flyActive=false State.FlyActive=false
                 disableFly() consoleOut("Fly OFF",Theme.Murderer) updateStatus()
@@ -5247,7 +5661,7 @@ local function createAltConsole()
             updateStatus()
             consoleOut("ESP "..(on and "ON" or "OFF"))
 
-        elseif cmd == "fullbright" or cmd == "fb" then
+        elseif cmd == "fullbright" then
             local on = arg:lower()~="off"
             State.Fullbright = on
             Lighting.Ambient    = on and Color3.new(1,1,1) or Color3.fromRGB(70,70,70)
@@ -5263,15 +5677,15 @@ local function createAltConsole()
                 _G.SKA_BRING_CONN = Connections.Bring
                 consoleOut("Bring All ON",Theme.Alive)
             else
-                local tPlr = Players:FindFirstChild(arg)
-                if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
                 if LocalUser.Rank < 1 then consoleOut("No permission",Theme.Murderer) return end
+                local tPlr = needPlayer()
+                if not tPlr then return end
                 executeCommand(tPlr,"bring")
-                consoleOut("Brought "..arg)
+                consoleOut("Brought "..tPlr.Name)
             end
             updateStatus()
 
-        elseif cmd == "unbring" or cmd == "stopbring" then
+        elseif cmd == "unbring" then
             State.BringActive = false
             if Connections.Bring then Connections.Bring:Disconnect() Connections.Bring=nil end
             updateStatus()
@@ -5279,68 +5693,88 @@ local function createAltConsole()
 
         elseif cmd == "kill" then
             if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"kill")
-            consoleOut("Killed "..arg, Theme.Murderer)
+            consoleOut("Killed "..tPlr.Name, Theme.Murderer)
 
         elseif cmd == "crash" then
             if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"crash")
-            consoleOut("Crashed "..arg, Theme.Murderer)
+            consoleOut("Crashed "..tPlr.Name, Theme.Murderer)
 
         elseif cmd == "respawn" then
             if LocalUser.Rank < 2 then consoleOut("Requires Admin rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"respawn")
-            consoleOut("Respawned "..arg)
+            consoleOut("Respawned "..tPlr.Name)
 
         elseif cmd == "fling" then
+            -- Admin fling via bridge (premium+)
             if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"fling")
-            consoleOut("Flung "..arg)
+            consoleOut("Flung "..tPlr.Name)
+
+        elseif cmd == "lfling" then
+            -- Local troll fling — any player, premium+
+            if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
+            flingPlayerLocal(tPlr)
+            consoleOut("Flinging "..tPlr.Name)
 
         elseif cmd == "blind" then
             if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"blind")
-            consoleOut("Blinded "..arg)
+            consoleOut("Blinded "..tPlr.Name)
 
         elseif cmd == "freeze" then
             if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"freeze")
-            consoleOut("Froze "..arg)
+            consoleOut("Froze "..tPlr.Name)
 
         elseif cmd == "unfreeze" then
             if LocalUser.Rank < 1 then consoleOut("Requires Premium rank",Theme.Murderer) return end
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+            local tPlr = needPlayer()
+            if not tPlr then return end
             executeCommand(tPlr,"unfreeze")
-            consoleOut("Unfroze "..arg)
+            consoleOut("Unfroze "..tPlr.Name)
 
-        elseif cmd == "tp" or cmd == "teleport" then
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr or not tPlr.Character then consoleOut("Player not found: "..arg, Theme.Murderer) return end
+        elseif cmd == "goto" then
+            local tPlr = needPlayer()
+            if not tPlr or not tPlr.Character then return end
             local myHRP = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
             local tgHRP = tPlr.Character:FindFirstChild("HumanoidRootPart")
             if myHRP and tgHRP then
-                myHRP.CFrame = tgHRP.CFrame * CFrame.new(0,0,4)
-                consoleOut("Teleported to "..arg)
+                myHRP.CFrame = tgHRP.CFrame * CFrame.new(0, 0, 4)
+                consoleOut("Went to "..tPlr.Name.." ("..tPlr.DisplayName..")")
+            else
+                consoleOut("Target has no character", Theme.Murderer)
             end
 
-        elseif cmd == "flingplayer" or cmd == "lfling" then
-            local tPlr = Players:FindFirstChild(arg)
-            if not tPlr then consoleOut("Player not found: "..arg, Theme.Murderer) return end
-            flingPlayerLocal(tPlr)
-            consoleOut("Flinging "..arg)
+        elseif cmd == "rejoin" then
+            consoleOut("Rejoining…")
+            notify("Rejoin", "Teleporting back to this game…", 2)
+            task.spawn(function()
+                local ok = pcall(function()
+                    -- Prefer same server instance when possible
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, localPlayer)
+                end)
+                if not ok then
+                    pcall(function()
+                        TeleportService:Teleport(game.PlaceId, localPlayer)
+                    end)
+                end
+            end)
 
         elseif cmd == "spin" then
             spinSelf(tonumber(arg) or 3)
@@ -5354,7 +5788,7 @@ local function createAltConsole()
             noclipToggle()
             consoleOut("Noclip toggled")
 
-        elseif cmd == "jump" or cmd == "jumpspam" then
+        elseif cmd == "jump" then
             danceSpam()
             consoleOut("Jump spam")
 
@@ -5362,7 +5796,7 @@ local function createAltConsole()
             shootMurderer()
             consoleOut("Shoot murderer")
 
-        elseif cmd == "throw" or cmd == "knifethrow" then
+        elseif cmd == "throw" then
             knifeThrow(false)
             consoleOut("Knife throw")
 
@@ -5375,24 +5809,72 @@ local function createAltConsole()
             announceRoles()
             consoleOut("Roles announced")
 
-        elseif cmd == "discord" or cmd == "gg" then
+        elseif cmd == "discord" then
             consoleOut("Join: "..tostring(CONFIG.DiscordInvite), Theme.Accent)
             if setclipboard then setclipboard(CONFIG.DiscordInvite) end
 
-        elseif cmd == "nametag" or cmd == "nt" then
+        elseif cmd == "nametag" then
             if openNametagEditor then openNametagEditor()
             else consoleOut("Editor not ready",Theme.Murderer) end
 
         elseif cmd == "help" then
-            consoleOut("fly unfly bring esp fb tp flingplayer spin rocket noclip jump shoot throw killaura roles discord nametag kill fling freeze help")
+            consoleOut("!b/!bring  !goto/!tp  !rj/!rejoin  !f fling  !lf  !k kill  !fb  !e esp  !fly  !h help")
 
         else
-            consoleOut("Unknown: "..cmd.." (;help for list)", Theme.Murderer)
+            consoleOut("Unknown: "..rawCmd.."  (!help / ;help)", Theme.Murderer)
         end
     end
 
-    -- Expose for MainFrame cmd bar
+    -- Expose for MainFrame cmd bar + chat
     _G.SKA_runCommand = runCommand
+
+    -- ============================================================
+    -- CHAT COMMANDS  (!bring Name  /  !b DisplayName  /  ;goto x)
+    -- ============================================================
+    local function handleChatMessage(msg)
+        if type(msg) ~= "string" then return end
+        msg = msg:match("^%s*(.-)%s*$") or ""
+        -- Only treat messages starting with ! ; / . as commands
+        local first = msg:sub(1, 1)
+        if first ~= "!" and first ~= ";" and first ~= "/" and first ~= "." then
+            return
+        end
+        runCommand(msg)
+    end
+
+    -- Legacy chat
+    pcall(function()
+        localPlayer.Chatted:Connect(handleChatMessage)
+    end)
+
+    -- TextChatService (new Roblox chat)
+    pcall(function()
+        local TextChat = game:GetService("TextChatService")
+        if TextChat then
+            if TextChat.MessageReceived then
+                TextChat.MessageReceived:Connect(function(message)
+                    local src = message.TextSource
+                    if src and src.UserId == localPlayer.UserId then
+                        handleChatMessage(message.Text)
+                    end
+                end)
+            end
+            -- Sending path (fires for local player in some clients)
+            local channels = TextChat:FindFirstChild("TextChannels")
+            if channels then
+                for _, ch in ipairs(channels:GetChildren()) do
+                    if ch:IsA("TextChannel") then
+                        ch.MessageReceived:Connect(function(message)
+                            local src = message.TextSource
+                            if src and src.UserId == localPlayer.UserId then
+                                handleChatMessage(message.Text)
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end)
 
     inputBox.FocusLost:Connect(function(enterPressed)
         if enterPressed then
@@ -5753,24 +6235,18 @@ local function initialize()
     applyTheme()
     updateStatus()
 
-    -- RightShift toggles main UI (handy on desktop)
+    -- RightShift toggles main UI with same morph animation
     UserInputService.InputBegan:Connect(function(inp, gp)
         if gp then return end
         if inp.KeyCode == Enum.KeyCode.RightShift then
-            if UI.MainFrame then
+            if not UI.MainFrame then return end
+            task.spawn(function()
                 if UI.MainFrame.Visible then
-                    -- collapse to mini at current position
-                    if UI.MiniButton then
-                        local abs = UI.MainFrame.AbsolutePosition
-                        UI.MiniButton.Position = UDim2.new(0, abs.X, 0, abs.Y)
-                        UI.MiniButton.Visible = true
-                    end
-                    UI.MainFrame.Visible = false
+                    if UI.shrinkToMini then UI.shrinkToMini() end
                 else
-                    UI.MainFrame.Visible = true
-                    if UI.MiniButton then UI.MiniButton.Visible = false end
+                    if UI.expandFromMini then UI.expandFromMini() end
                 end
-            end
+            end)
         end
     end)
 
