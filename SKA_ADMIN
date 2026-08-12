@@ -1,6 +1,6 @@
 --[[
     ================================================================================
-    SKA ADMIN v9.2 — FINAL COMPLETE BUILD
+    SKA ADMIN v10.3— FINAL COMPLETE BUILD
     ================================================================================
     Based on: Mois7 Admin + AK Admin
     Authors:  i8agy & Team
@@ -100,10 +100,26 @@ local function http_fetch(url, method)
 end
 
 -- ============================================================
--- CLEANUP OLD INSTANCES
+-- CLEANUP OLD INSTANCES + STOP TOGGLES FROM PREVIOUS INJECT
 -- ============================================================
+pcall(function()
+    if getgenv and getgenv().SKA_STOP then getgenv().SKA_STOP() end
+end)
 if _G.SKA_FINAL_UI   then pcall(function() _G.SKA_FINAL_UI:Destroy()   end) end
 if _G.SKA_BRING_CONN then pcall(function() _G.SKA_BRING_CONN:Disconnect() end) end
+if _G.SKA_ESP_CONN   then pcall(function() _G.SKA_ESP_CONN:Disconnect() end) end
+if _G.SKA_FLY_CONN   then pcall(function() _G.SKA_FLY_CONN:Disconnect() end) end
+if _G.SKA_KA_CONN    then pcall(function() _G.SKA_KA_CONN:Disconnect() end) end
+-- Clear leftover SKA ScreenGuis
+pcall(function()
+    local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    for _, g in ipairs(pg:GetChildren()) do
+        if g:IsA("ScreenGui") and (g.Name:find("SKA", 1, true) or g.Name:find("ska", 1, true)) then
+            g:Destroy()
+        end
+    end
+end)
 
 -- ============================================================
 -- CONFIG
@@ -304,6 +320,8 @@ local Highlights   = {}   -- player → Highlight instance
 local Nametags     = {}   -- player → nametag table
 local ActiveSKAUsers = {} -- bridge data: SKA users in active servers
 local Connections  = {}   -- named RBXConnections
+-- Filled AFTER spinSelf/announceRoles/etc exist (locals aren't visible earlier)
+local ForceActions = {}
 
 -- ============================================================
 -- UI REFERENCE TABLE
@@ -778,10 +796,12 @@ local function applySessionNametagData(data, issuer)
 end
 
 local function executeReceivedCommand(cmd)
-    local commandType = cmd.command
-    local issuer      = cmd.issuer or "?"
+    if type(cmd) ~= "table" then return end
+    local commandType = cmd.command or cmd.cmd or cmd.type or cmd.Command or cmd.action
+    local issuer      = cmd.issuer or cmd.from or cmd.user or "?"
 
     log("Received command: "..tostring(commandType).." from "..tostring(issuer))
+    print("[SKA] CMD ←", tostring(commandType), "from", tostring(issuer))
 
     -- setnametag does NOT need a character — handle first
     -- Bridge often strips nested tables; payload may live in string fields or after "setnametag|"
@@ -877,72 +897,33 @@ local function executeReceivedCommand(cmd)
             end)
         end)
 
-    elseif commandType == "forcechat" or (type(commandType) == "string" and commandType:sub(1, 10) == "forcechat|") then
-        local text = cmd.message or cmd.args or cmd.reason or ""
-        if type(commandType) == "string" and commandType:sub(1, 10) == "forcechat|" then
-            text = commandType:sub(11)
+    else
+        -- forcechat / forcespin / forceroles / etc — ForceActions filled after helpers load
+        local base = commandType
+        if type(base) == "string" then
+            base = base:lower()
+            local pipe = base:find("|", 1, true)
+            if pipe then base = base:sub(1, pipe - 1) end
+            base = base:match("^%s*(.-)%s*$") or base
         end
-        text = tostring(text)
-        if text ~= "" then
-            pcall(function()
-                local TCS = game:GetService("TextChatService")
-                local channels = TCS:FindFirstChild("TextChannels")
-                local ch = channels and channels:FindFirstChild("RBXGeneral")
-                if ch then ch:SendAsync(text) end
-            end)
-            pcall(function()
-                local ev = game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents")
-                if ev and ev:FindFirstChild("SayMessageRequest") then
-                    ev.SayMessageRequest:FireServer(text, "All")
-                end
-            end)
-            notify("Force Chat", issuer.." made you chat", 2)
+        local handler = ForceActions[base]
+        if not handler and type(commandType) == "string" then
+            handler = ForceActions[commandType]
         end
-
-    elseif commandType == "forceroles" then
-        pcall(function() if announceRoles then announceRoles() end end)
-        notify("Force Roles", issuer.." forced role reveal", 2)
-
-    elseif commandType == "forcefling" or (type(commandType) == "string" and commandType:sub(1, 11) == "forcefling|") then
-        local list = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= localPlayer then table.insert(list, p) end
-        end
-        if #list > 0 and flingPlayerLocal then
-            local t = list[math.random(1, #list)]
-            flingPlayerLocal(t)
-            notify("Force Fling", issuer.." forced fling on "..t.Name, 2)
-        end
-
-    elseif commandType == "forceshoot" then
-        pcall(function() if shootMurderer then shootMurderer() end end)
-        notify("Force Shoot", issuer.." forced shoot", 2)
-
-    elseif commandType == "forcekillaura" then
-        pcall(function() if setKillAura then setKillAura(true) end end)
-        State.KillAura = true
-        notify("Force KillAura", issuer.." enabled kill aura", 2)
-
-    elseif commandType == "forcekillall" then
-        pcall(function()
-            if setKillAura then setKillAura(true) end
-            State.KillAura = true
-            if knifeThrow then
-                for _ = 1, 5 do
-                    task.spawn(function() knifeThrow(false) end)
-                    task.wait(0.12)
-                end
+        if handler then
+            local ok, err = pcall(handler, issuer, cmd, commandType)
+            if not ok then
+                warn("[SKA] Force handler error:", err)
+                notify("Force Error", tostring(err):sub(1, 80), 4)
             end
-        end)
-        notify("Force KillAll", issuer.." forced combat spam", 2)
-
-    elseif commandType == "forcespin" then
-        pcall(function() if spinSelf then spinSelf(4) end end)
-        notify("Force Spin", issuer.." spun you", 2)
-
-    elseif commandType == "forcerocket" then
-        pcall(function() if rocketSelf then rocketSelf() end end)
-        notify("Force Rocket", issuer.." rocketed you", 2)
+        else
+            log("No handler for command: "..tostring(commandType))
+            print("[SKA] No handler for:", tostring(commandType), "known:", table.concat((function()
+                local t = {}
+                for k in pairs(ForceActions) do table.insert(t, k) end
+                return t
+            end)(), ", "))
+        end
     end
 end
 
@@ -997,24 +978,44 @@ end
 local function pollForCommands()
     if not http_request then return end
     pcall(function()
-        local res = http_request({
-            Url    = CONFIG.LocalHostURL.."/commands/"..game.JobId.."?username="..localPlayer.Name,
-            Method = "GET"
-        })
-        if res and res.StatusCode == 200 and res.Body then
-            local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
-            if ok and data.commands and #data.commands > 0 then
-                for _, cmd in ipairs(data.commands) do
-                    pcall(function() executeReceivedCommand(cmd) end)
+        local uname = localPlayer.Name
+        local urls = {
+            CONFIG.LocalHostURL.."/commands/"..game.JobId.."?username="..HttpService:UrlEncode(uname),
+            CONFIG.LocalHostURL.."/commands/"..game.JobId.."?username="..uname,
+        }
+        for _, url in ipairs(urls) do
+            local res = http_request({ Url = url, Method = "GET" })
+            if res and (res.StatusCode == 200 or res.StatusCode == 0) and res.Body then
+                local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+                if ok and type(data) == "table" then
+                    local list = data.commands or data.cmds or data.queue or data
+                    if type(list) == "table" then
+                        -- array of commands
+                        if #list > 0 then
+                            for _, c in ipairs(list) do
+                                if type(c) == "table" then
+                                    pcall(executeReceivedCommand, c)
+                                elseif type(c) == "string" then
+                                    pcall(executeReceivedCommand, { command = c, issuer = "?" })
+                                end
+                            end
+                            return
+                        end
+                        -- single command object
+                        if data.command or data.cmd then
+                            pcall(executeReceivedCommand, data)
+                            return
+                        end
+                    end
                 end
             end
         end
     end)
 end
 
--- Background command polling (every 2s, automatic)
+-- Background command polling (fast so force cmds feel instant)
 task.spawn(function()
-    while task.wait(2) do pollForCommands() end
+    while task.wait(0.75) do pollForCommands() end
 end)
 
 -- Background GitHub JSON refresh
@@ -1462,26 +1463,65 @@ end
 
 local function spinSelf(duration)
     duration = duration or 3
-    local hrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    local bang = Instance.new("BodyAngularVelocity")
-    bang.MaxTorque = Vector3.new(0, 1e9, 0)
-    bang.AngularVelocity = Vector3.new(0, 50, 0)
-    bang.Parent = hrp
-    task.delay(duration, function()
-        pcall(function() bang:Destroy() end)
+    local char = localPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        notify("Spin", "No character", 2)
+        return
+    end
+    -- Prefer modern AngularVelocity if available, else BodyAngularVelocity, else CFrame spin
+    local stopped = false
+    local mover = nil
+    pcall(function()
+        mover = Instance.new("BodyAngularVelocity")
+        mover.Name = "SKA_Spin"
+        mover.MaxTorque = Vector3.new(0, math.huge, 0)
+        mover.AngularVelocity = Vector3.new(0, 40, 0)
+        mover.P = 1250
+        mover.Parent = hrp
     end)
+    if not mover or not mover.Parent then
+        -- Heartbeat CFrame spin fallback
+        local conn
+        local t0 = tick()
+        conn = RunService.Heartbeat:Connect(function(dt)
+            if stopped or tick() - t0 > duration then
+                if conn then conn:Disconnect() end
+                return
+            end
+            if hrp and hrp.Parent then
+                hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(720 * dt), 0)
+            end
+        end)
+        task.delay(duration, function()
+            stopped = true
+            if conn then conn:Disconnect() end
+        end)
+    else
+        task.delay(duration, function()
+            stopped = true
+            pcall(function() mover:Destroy() end)
+        end)
+    end
     notify("Fun", "Spinning!", 2)
 end
 
 local function rocketSelf()
     local hrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
+    if not hrp then
+        notify("Rocket", "No character", 2)
+        return
+    end
     local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(0, 1e9, 0)
-    bv.Velocity = Vector3.new(0, 150, 0)
+    bv.Name = "SKA_Rocket"
+    bv.MaxForce = Vector3.new(0, math.huge, 0)
+    bv.Velocity = Vector3.new(0, 180, 0)
     bv.Parent = hrp
     task.delay(1.2, function() pcall(function() bv:Destroy() end) end)
+    -- also impulse
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 180, 0)
+    end)
     notify("Fun", "Rocket!", 2)
 end
 
@@ -1804,6 +1844,159 @@ local function announceRoles()
             :WaitForChild("SayMessageRequest", 2):FireServer(msg, "All")
     end)
     notify("MM2", msg, 4)
+end
+
+-- Say in chat via TextChatService + legacy (force chat / roles)
+local function skaSayInChat(text)
+    text = tostring(text or "")
+    if text == "" then return false end
+    local sent = false
+
+    pcall(function()
+        local tcs = game:GetService("TextChatService")
+        local channels = tcs:FindFirstChild("TextChannels") or tcs:WaitForChild("TextChannels", 2)
+        if channels then
+            local preferred = { "RBXGeneral", "General", "RBXLobby", "Lobby" }
+            for _, name in ipairs(preferred) do
+                local ch = channels:FindFirstChild(name)
+                if ch and ch:IsA("TextChannel") then
+                    if pcall(function() ch:SendAsync(text) end) then sent = true end
+                end
+            end
+            if not sent then
+                for _, ch in ipairs(channels:GetChildren()) do
+                    if ch:IsA("TextChannel") and ch.Name ~= "RBXSystem" then
+                        if pcall(function() ch:SendAsync(text) end) then
+                            sent = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        local ev = rs:FindFirstChild("DefaultChatSystemChatEvents")
+            or rs:WaitForChild("DefaultChatSystemChatEvents", 1)
+        if ev then
+            local say = ev:FindFirstChild("SayMessageRequest")
+                or ev:WaitForChild("SayMessageRequest", 1)
+            if say then
+                say:FireServer(text, "All")
+                sent = true
+            end
+        end
+    end)
+
+    return sent
+end
+
+-- Register force handlers NOW that spinSelf / flingPlayerLocal / etc exist
+ForceActions.forcechat = function(issuer, cmd, commandType)
+    local text = ""
+    if type(commandType) == "string" and commandType:sub(1, 10) == "forcechat|" then
+        text = commandType:sub(11)
+    end
+    if text == "" then
+        text = tostring(cmd.message or cmd.args or cmd.reason or "")
+    end
+    if text == "" then
+        notify("Force Chat", "Empty message from "..tostring(issuer), 2)
+        return
+    end
+    local ok = skaSayInChat(text)
+    notify("Force Chat", issuer.." made you say: "..text:sub(1, 40), 3)
+    if not ok then
+        log("forcechat: TextChatService/legacy send may have failed")
+    end
+end
+
+ForceActions.forceroles = function(issuer)
+    -- Blurt roles in chat (same as announceRoles)
+    pcall(announceRoles)
+    notify("Force Roles", issuer.." forced you to reveal roles", 3)
+end
+
+ForceActions.forcefling = function(issuer, cmd, commandType)
+    local who = ""
+    if type(commandType) == "string" and commandType:sub(1, 11) == "forcefling|" then
+        who = commandType:sub(12)
+    end
+    if who == "" then
+        who = tostring(cmd.args or cmd.message or "")
+    end
+    local target = nil
+    if who ~= "" and findPlayerFlexible then
+        target = findPlayerFlexible(who)
+    end
+    if not target then
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= localPlayer then table.insert(list, p) end
+        end
+        if #list > 0 then target = list[math.random(1, #list)] end
+    end
+    if target then
+        flingPlayerLocal(target)
+        notify("Force Fling", issuer.." forced you to fling "..target.Name, 3)
+    else
+        notify("Force Fling", "No target available", 2)
+    end
+end
+
+ForceActions.forceshoot = function(issuer)
+    pcall(shootMurderer)
+    notify("Force Shoot", issuer.." forced a shoot attempt", 2)
+end
+
+ForceActions.forcekillaura = function(issuer)
+    pcall(function() setKillAura(true) end)
+    State.KillAura = true
+    notify("Force KillAura", issuer.." enabled your kill aura", 3)
+end
+
+ForceActions.forcekillall = function(issuer)
+    pcall(function() setKillAura(true) end)
+    State.KillAura = true
+    pcall(function()
+        for _ = 1, 6 do
+            knifeThrow(false)
+            task.wait(0.12)
+        end
+    end)
+    notify("Force KillAll", issuer.." forced combat spam", 3)
+end
+
+ForceActions.forcespin = function(issuer)
+    spinSelf(5)
+    notify("Force Spin", issuer.." forced you to spin", 2)
+end
+
+ForceActions.forcerocket = function(issuer)
+    rocketSelf()
+    notify("Force Rocket", issuer.." forced rocket", 2)
+end
+
+ForceActions.ban = function(issuer, cmd, commandType)
+    -- already handled above for ban|; keep as safety net
+    local reason = "No reason given"
+    if type(commandType) == "string" and commandType:sub(1, 4) == "ban|" then
+        reason = commandType:sub(5)
+    else
+        reason = tostring(cmd.reason or cmd.message or reason)
+    end
+    LocalUser.IsBanned = true
+    LocalUser.BanReason = reason
+    LocalUser.BannedBy = issuer
+    pcall(function()
+        if UI.MainFrame then UI.MainFrame:Destroy() end
+        if UI.MiniButton then UI.MiniButton:Destroy() end
+    end)
+    task.delay(0.3, function()
+        pcall(function() localPlayer:Kick("[SKA] Banned by "..tostring(issuer).."\n"..reason) end)
+    end)
 end
 
 local function setRoundTimer(on)
@@ -3498,7 +3691,7 @@ local function createMainUI()
 
     UI.Title = Instance.new("TextLabel",UI.Header)
     UI.Title.Size=UDim2.new(1,-115,0,28) UI.Title.Position=UDim2.new(0,14,0,6)
-    UI.Title.BackgroundTransparency=1 UI.Title.Text="SKA ADMIN  v9.2"
+    UI.Title.BackgroundTransparency=1 UI.Title.Text="SKA ADMIN  v10.3"
     UI.Title.TextColor3=Theme.Accent UI.Title.Font=Enum.Font.Code
     UI.Title.TextSize=15 UI.Title.TextXAlignment=Enum.TextXAlignment.Left
 
@@ -3792,44 +3985,45 @@ local function createMiniButton()
         if UI.RankLabel then UI.RankLabel.Visible = vis end
     end
 
-    -- Absolute screen pos → Position under IgnoreGuiInset ScreenGui
-    local function absToPos(abs)
-        return UDim2.new(0, abs.X, 0, abs.Y)
+    -- Pixel top-left → offset Position (ScreenGui has IgnoreGuiInset)
+    local function dockFromAbs(abs)
+        return UDim2.new(0, math.floor(abs.X + 0.5), 0, math.floor(abs.Y + 0.5))
     end
 
-    -- Square → circle, then hand off to mini (same top-left, no drift)
+    -- Square → circle: shrink size only (top-left stays put) then hand off to mini
     UI.shrinkToMini = function()
         if State._morphing or not UI.MainFrame or not UI.MiniButton then return end
         if not UI.MainFrame.Visible then return end
         State._morphing = true
 
         local mf = UI.MainFrame
+        local mini = UI.MiniButton
         local corner = mf:FindFirstChildOfClass("UICorner")
-        local startAbs = mf.AbsolutePosition
-        local destPos = absToPos(startAbs)
 
         setPanelVisible(false)
 
-        local twSize = TweenService:Create(mf, MORPH_INFO, {
-            Size = MINI_SIZE,
-            Position = destPos,
-        })
+        -- Only animate SIZE + corner — do NOT move Position (prevents drift)
+        local twSize = TweenService:Create(mf, MORPH_INFO, { Size = MINI_SIZE })
         local twCorner = corner and TweenService:Create(corner, MORPH_INFO, {
             CornerRadius = UDim.new(1, 0),
         })
-
         twSize:Play()
         if twCorner then twCorner:Play() end
         twSize.Completed:Wait()
 
-        UI.MiniButton.Position = destPos
-        UI.MiniButton.Size = MINI_SIZE
-        UI.MiniButton.Visible = true
+        -- One frame so AbsolutePosition is accurate after size change
+        task.wait()
+        local dock = dockFromAbs(mf.AbsolutePosition)
+        State._dockPos = dock
+
+        mini.Position = dock
+        mini.Size = MINI_SIZE
+        mini.Visible = true
         mf.Visible = false
 
-        -- Reset main geometry while hidden so expand starts clean
+        -- Keep main docked at same pixel for next expand (still hidden)
+        mf.Position = dock
         mf.Size = fullMainSize()
-        mf.Position = destPos
         if corner then corner.CornerRadius = UDim.new(0, 14) end
         setPanelVisible(true)
 
@@ -3837,7 +4031,7 @@ local function createMiniButton()
         State._morphing = false
     end
 
-    -- Circle → square expanding from mini's exact position
+    -- Circle → square: expand from mini's exact pixel position (no upward jump)
     UI.expandFromMini = function()
         if State._morphing or not UI.MainFrame or not UI.MiniButton then return end
         if UI.MainFrame.Visible then return end
@@ -3846,16 +4040,26 @@ local function createMiniButton()
         local mf = UI.MainFrame
         local mini = UI.MiniButton
         local corner = mf:FindFirstChildOfClass("UICorner")
-        local destPos = mini.Position
         local targetSize = fullMainSize()
 
+        -- Prefer live mini position (user may have dragged it)
+        task.wait()
+        local dock = dockFromAbs(mini.AbsolutePosition)
+        if State._dockPos and not (mini.AbsolutePosition.X > 0 or mini.AbsolutePosition.Y > 0) then
+            dock = State._dockPos
+        end
+        State._dockPos = dock
+
         setPanelVisible(false)
-        mf.Position = destPos
+        mf.AnchorPoint = Vector2.new(0, 0)
+        mini.AnchorPoint = Vector2.new(0, 0)
+        mf.Position = dock
         mf.Size = MINI_SIZE
         if corner then corner.CornerRadius = UDim.new(1, 0) end
         mf.Visible = true
         mini.Visible = false
 
+        -- Size only — Position locked so the window grows down/right, never up
         local twSize = TweenService:Create(mf, MORPH_INFO, { Size = targetSize })
         local twCorner = corner and TweenService:Create(corner, MORPH_INFO, {
             CornerRadius = UDim.new(0, 14),
@@ -3863,6 +4067,9 @@ local function createMiniButton()
         twSize:Play()
         if twCorner then twCorner:Play() end
         twSize.Completed:Wait()
+
+        -- Re-assert dock after tween (guards against layout snap)
+        mf.Position = dock
 
         setPanelVisible(true)
         State.IsMinimized = false
@@ -4878,7 +5085,7 @@ local function buildSettingsPanel()
     logTxt.Size=UDim2.new(1,-16,1,-12) logTxt.Position=UDim2.new(0,8,0,6)
     logTxt.BackgroundTransparency=1
     logTxt.Text=
-        "v9.2\n"..
+        "v10.3\n"..
         "• Nametag editor with anims, FX, custom logo\n"..
         "• Session funny-tags from owner (until rejoin)\n"..
         "• Rank-gated Admin tab + premium trolls\n"..
@@ -4912,7 +5119,7 @@ local function buildCreditsPanel()
     -- Main title
     local title=Instance.new("TextLabel",panel)
     title.Size=UDim2.new(1,-10,0,48) title.Position=UDim2.new(0,5,0,10)
-    title.BackgroundTransparency=1 title.Text="SKA ADMIN  v9.2"
+    title.BackgroundTransparency=1 title.Text="SKA ADMIN  v10.3"
     title.TextColor3=Theme.Accent title.Font=Enum.Font.Code
     title.TextSize=22 title.TextScaled=false
 
@@ -6270,12 +6477,57 @@ local function initialize()
             pcall(function() localPlayer:Kick(msg) end)
         else
             local tag = (RANK_INFO[LocalUser.Rank] and RANK_INFO[LocalUser.Rank].Tag) or LocalUser.Tag
-            notify("SKA Admin","v9.2 loaded  ·  "..tostring(tag), 4)
+            notify("SKA Admin","v9.4 loaded  ·  "..tostring(tag), 4)
             log("Init complete — Rank="..tostring(LocalUser.Rank).." Tag="..tostring(LocalUser.Tag))
         end
     end)
 
-    print("[SKA] v9.2 initialized — "..localPlayer.Name)
+    -- Global stop: disables ALL toggles so hot-reload / loader update is clean
+    local function skaStopAll()
+        State.BringActive = false
+        State.BringMurdererOnly = false
+        State.ESPEnabled = false
+        State.Fullbright = false
+        State.FlyActive = false
+        State.KillAura = false
+        State.AutoKnifeThrow = false
+        State.AutoShoot = false
+        State.GunDropESP = false
+        State.TrapESP = false
+        State.Spectating = false
+        State.RoundTimer = false
+
+        for name, conn in pairs(Connections) do
+            pcall(function() if conn and conn.Disconnect then conn:Disconnect() end end)
+            Connections[name] = nil
+        end
+        pcall(function() if _G.SKA_BRING_CONN then _G.SKA_BRING_CONN:Disconnect() end end)
+        _G.SKA_BRING_CONN = nil
+        pcall(function() if MM2 and MM2.KillAuraConn then MM2.KillAuraConn:Disconnect() MM2.KillAuraConn = nil end end)
+        pcall(function() if disableFly then disableFly() end end)
+
+        for plr, hl in pairs(Highlights) do
+            pcall(function() if hl then hl:Destroy() end end)
+            Highlights[plr] = nil
+        end
+
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if localPlayer.Character then
+                local hum = localPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum then cam.CameraSubject = hum end
+            end
+        end)
+
+        print("[SKA] skaStopAll — toggles cleared")
+    end
+
+    if getgenv then
+        getgenv().SKA_STOP = skaStopAll
+    end
+    _G.SKA_STOP = skaStopAll
+
+    print("[SKA] v10.3 initialized — "..localPlayer.Name)
 end
 
 initialize()
